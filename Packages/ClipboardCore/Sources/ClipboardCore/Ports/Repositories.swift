@@ -9,3 +9,13 @@ public protocol ClipPersisting: Sendable {
     func delete(id: UUID) async throws
     func delete(ids: Set<UUID>) async throws
 }
+
+public protocol PinnedLibrary: Sendable {
+    func allItems() async throws -> [PinnedRevision]
+    func search(_ query: String, limit: Int) async throws -> [PinnedRevision]
+    func pin(_ payload: PinPayload) async throws -> PinnedRevision
+    func revise(itemID: UUID, payload: PinPayload) async throws -> PinnedRevision
+    func delete(itemID: UUID) async throws -> PinnedTombstone
+    func applyRemote(_ mutation: PinnedMutation) async throws -> MergeOutcome
+    func advanceResetGeneration() async throws -> LibraryResetGeneration
+}
