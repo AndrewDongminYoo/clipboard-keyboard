@@ -682,6 +682,7 @@ git commit -m "feat(core): add pinned replica state"
 - Create: `Tests/macOS/AESGCMClipCipherTests.swift`
 - Create: `Tests/macOS/EncryptedMacClipStoreTests.swift`
 - Create: `Tests/macOS/MacHistoryIndexTests.swift`
+- Modify: `project.yml`
 
 **Interfaces:**
 
@@ -723,7 +724,10 @@ If Keychain, encryption, full-file write, atomic replacement, or metadata commit
 
 - [ ] **Step 4: Write failing retention, disk-content, and memory-index tests**
 
-Create a temporary store containing expired, over-count, pinned, and active records.
+Task 5 persists only unpinned, retention-bounded macOS clipboard history.
+Create a temporary store containing expired unpinned, over-count unpinned, and active unpinned records.
+Assert pinned envelopes are rejected and are not valid Task 5 fixtures.
+Pinned exemption from age and count eviction remains verified by `RetentionPolicyTests`, while Task 7 owns durable pinned persistence through `EncryptedMacPinnedStore` and `LocalMacPinnedLibrary`.
 Assert purge removes only selected ciphertext files and metadata rows.
 Recursively scan the temporary store and assert no file contains known title, preview, query, extracted value, source hint, or canonical string bytes.
 Assert `MacHistoryIndex.lock()` removes all search results without modifying encrypted files.
@@ -746,7 +750,7 @@ trunk check --no-fix Apps/macOS/Infrastructure/Persistence Tests/macOS
 ```
 
 Expected: tests pass and the source scan prints no production logging call.
-Stage only the persistence files and tests, review the staged diff, then commit:
+Stage only the persistence files, tests, and `project.yml`, review the staged diff, then commit:
 
 ```bash
 git commit -m "feat(mac): add encrypted local history"
