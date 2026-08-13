@@ -8,184 +8,24 @@ cd "${repo_root}"
 bootstatus_timeout_seconds=300
 simulator_build_timeout_seconds=600
 timeout_grace_seconds=10
-cleanup_grace_seconds=2
-active_child_pid=""
-active_command_pgid=""
-watchdog_pid=""
-watchdog_pgid=""
-timeout_marker=""
-verifier_shell_pgid="$(/bin/ps -o pgid= -p "$$" | /usr/bin/tr -d '[:space:]')"
+runner_build_dir="$(mktemp -d "${TMPDIR:-/tmp}/clipboard-keyboard-verify-runner.XXXXXX")"
+runner_path="${runner_build_dir}/bounded-runner"
 
-case "${verifier_shell_pgid}" in
-"" | *[!0-9]*)
-	echo "bounded verification command setup failed" >&2
-	exit 1
-	;;
-*) ;;
-esac
-
-is_safe_command_group() {
-	local leader_pid="$1"
-	local process_group_id="$2"
-
-	case "${process_group_id}" in
-	"" | *[!0-9]*) return 1 ;;
-	*) ;;
-	esac
-	[[ ${process_group_id} == "${leader_pid}" && ${process_group_id} != "${verifier_shell_pgid}" ]]
+cleanup_runner_build() {
+	/bin/rm -rf "${runner_build_dir}"
 }
 
-capture_command_group() {
-	local leader_pid="$1"
+trap cleanup_runner_build EXIT
 
-	/bin/ps -o pgid= -p "${leader_pid}" | /usr/bin/tr -d '[:space:]'
-}
-
-command_group_is_alive() {
-	local process_group_id="$1"
-
-	if ! is_safe_command_group "${process_group_id}" "${process_group_id}"; then
-		return 1
-	fi
-	/bin/kill -0 -- "-${process_group_id}" 2>/dev/null
-}
-
-terminate_command_group() {
-	local leader_pid="$1"
-	local process_group_id="$2"
-	local grace_seconds="$3"
-
-	if [[ -z ${process_group_id} ]]; then
-		process_group_id="${leader_pid}"
-	fi
-
-	if ! is_safe_command_group "${leader_pid}" "${process_group_id}"; then
-		echo "bounded verification command setup failed" >&2
-		return 1
-	fi
-
-	if ! /bin/kill -0 -- "-${process_group_id}" 2>/dev/null; then
-		return 0
-	fi
-
-	/bin/kill -TERM -- "-${process_group_id}" 2>/dev/null || true
-	if [[ ${grace_seconds} -gt 0 ]]; then
-		sleep "${grace_seconds}"
-	fi
-	if /bin/kill -0 -- "-${process_group_id}" 2>/dev/null; then
-		/bin/kill -KILL -- "-${process_group_id}" 2>/dev/null || true
-	fi
-}
-
-start_command_group() {
-	set -m
-	"$@" &
-	active_child_pid="$!"
-	set +m
-	active_command_pgid="$(capture_command_group "${active_child_pid}")"
-
-	if ! is_safe_command_group "${active_child_pid}" "${active_command_pgid}"; then
-		echo "bounded verification command setup failed" >&2
-		/bin/kill -TERM "${active_child_pid}" 2>/dev/null || true
-		sleep "${cleanup_grace_seconds}"
-		/bin/kill -KILL "${active_child_pid}" 2>/dev/null || true
-		wait "${active_child_pid}" 2>/dev/null || true
-		active_child_pid=""
-		active_command_pgid=""
-		return 1
-	fi
-}
-
-cleanup_bounded_command() {
-	local cleanup_failed=0
-
-	if [[ -n ${watchdog_pid} ]]; then
-		terminate_command_group "${watchdog_pid}" "${watchdog_pgid}" 0 || cleanup_failed=1
-		wait "${watchdog_pid}" 2>/dev/null || true
-		watchdog_pid=""
-		watchdog_pgid=""
-	fi
-
-	if [[ -n ${active_child_pid} ]]; then
-		terminate_command_group "${active_child_pid}" "${active_command_pgid}" "${cleanup_grace_seconds}" || cleanup_failed=1
-		wait "${active_child_pid}" 2>/dev/null || true
-		active_child_pid=""
-		active_command_pgid=""
-	fi
-
-	if [[ -n ${timeout_marker} ]]; then
-		/bin/rm -f "${timeout_marker}"
-		timeout_marker=""
-	fi
-
-	return "${cleanup_failed}"
-}
+clang_path="$(xcrun --find clang)"
+macos_sdk_path="$(xcrun --sdk macosx --show-sdk-path)"
+"${clang_path}" -isysroot "${macos_sdk_path}" -std=c11 -Wall -Wextra -Werror -pedantic scripts/bounded-runner.c -o "${runner_path}"
 
 run_bounded() {
 	local timeout_seconds="$1"
-	local command_exit=0
-	local watchdog_exit=0
-	local timed_out=0
-
 	shift
-	timeout_marker="$(mktemp "${TMPDIR:-/tmp}/clipboard-keyboard-verify.XXXXXX")"
-	/bin/rm -f "${timeout_marker}"
-	start_command_group "$@"
-
-	set -m
-	(
-		sleep "${timeout_seconds}"
-		if command_group_is_alive "${active_command_pgid}"; then
-			: >"${timeout_marker}"
-			terminate_command_group "${active_child_pid}" "${active_command_pgid}" "${timeout_grace_seconds}"
-			exit 42
-		fi
-		exit 0
-	) &
-	watchdog_pid="$!"
-	set +m
-	watchdog_pgid="$(capture_command_group "${watchdog_pid}")"
-	if ! is_safe_command_group "${watchdog_pid}" "${watchdog_pgid}"; then
-		echo "bounded verification command setup failed" >&2
-		cleanup_bounded_command
-		return 1
-	fi
-
-	set +e
-	wait "${active_child_pid}" 2>/dev/null
-	command_exit=$?
-	set -e
-
-	if [[ ! -e ${timeout_marker} ]] && command_group_is_alive "${watchdog_pgid}"; then
-		terminate_command_group "${watchdog_pid}" "${watchdog_pgid}" 0 || true
-	fi
-	set +e
-	wait "${watchdog_pid}" 2>/dev/null
-	watchdog_exit=$?
-	set -e
-
-	if [[ ${watchdog_exit} -eq 42 ]]; then
-		timed_out=1
-	fi
-
-	terminate_command_group "${active_child_pid}" "${active_command_pgid}" "${timeout_grace_seconds}" || true
-	active_child_pid=""
-	active_command_pgid=""
-	watchdog_pid=""
-	watchdog_pgid=""
-	/bin/rm -f "${timeout_marker}"
-	timeout_marker=""
-
-	if [[ ${timed_out} -eq 1 ]]; then
-		echo "bounded verification command timed out" >&2
-		return 1
-	fi
-
-	return "${command_exit}"
+	"${runner_path}" "${timeout_seconds}" "${timeout_grace_seconds}" -- "$@"
 }
-
-trap cleanup_bounded_command EXIT
-trap 'exit 1' INT TERM
 
 ./scripts/generate-project.sh
 keyboard_open_access=""
