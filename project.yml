@@ -30,7 +30,7 @@ targets:
     type: application
     platform: macOS
     sources:
-      - Apps/macOS/App
+      - Apps/macOS
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.andrewdongminyoo.clipboardkeyboard.mac
