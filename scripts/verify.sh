@@ -55,6 +55,10 @@ terminate_command_group() {
 	local process_group_id="$2"
 	local grace_seconds="$3"
 
+	if [[ -z ${process_group_id} ]]; then
+		process_group_id="${leader_pid}"
+	fi
+
 	if ! is_safe_command_group "${leader_pid}" "${process_group_id}"; then
 		echo "bounded verification command setup failed" >&2
 		return 1
