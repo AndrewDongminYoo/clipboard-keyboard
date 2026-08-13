@@ -1,7 +1,10 @@
+@testable import ClipboardKeyboardiOS
 import XCTest
 
 final class PhoneTargetSmokeTests: XCTestCase {
-    func testTargetLoads() {
-        XCTAssertTrue(true)
+    func testAppTargetBundleIdentifier() {
+        _ = ClipboardKeyboardApp.self
+
+        XCTAssertEqual(Bundle.main.bundleIdentifier, "com.andrewdongminyoo.clipboardkeyboard.ios")
     }
 }
