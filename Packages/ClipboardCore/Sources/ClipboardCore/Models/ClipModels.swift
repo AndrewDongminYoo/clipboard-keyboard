@@ -141,3 +141,173 @@ public struct ClipMetadata: Hashable, Codable, Sendable {
         self.isPinned = isPinned
     }
 }
+
+public enum RepresentationKind: String, Codable, CaseIterable, Sendable {
+    case plainText
+    case markdown
+    case rtf
+    case html
+}
+
+public enum CopyFormat: String, Codable, CaseIterable, Sendable {
+    case originalCompatible
+    case plainText
+    case markdownSource
+    case html
+    case rtf
+    case digitsOnly
+    case trimSurroundingWhitespace
+    case normalizeInternalWhitespace
+}
+
+public enum ContentKind: String, Codable, CaseIterable, Sendable {
+    case plainText
+    case markdown
+    case richText
+    case code
+}
+
+public enum ClipCategory: String, Codable, CaseIterable, Sendable {
+    case prompts
+    case code
+    case everyday
+}
+
+public enum ValueKind: String, Codable, CaseIterable, Sendable {
+    case phoneNumber
+    case emailAddress
+    case url
+    case oneTimeCode
+    case accountNumber
+}
+
+public struct ValueCandidate: Codable, Equatable, Sendable {
+    public let kind: ValueKind
+    public let original: String
+    public let digitsOnly: String?
+    public let normalized: String?
+    public let context: String
+    public let bankName: String?
+
+    public init(
+        kind: ValueKind,
+        original: String,
+        digitsOnly: String? = nil,
+        normalized: String? = nil,
+        context: String,
+        bankName: String? = nil
+    ) {
+        self.kind = kind
+        self.original = original
+        self.digitsOnly = digitsOnly
+        self.normalized = normalized
+        self.context = context
+        self.bankName = bankName
+    }
+}
+
+public struct RawTextRepresentation: Codable, Equatable, Sendable {
+    public let kind: RepresentationKind
+    public let data: Data
+    public let textProjection: String?
+
+    public init(kind: RepresentationKind, data: Data, textProjection: String?) {
+        self.kind = kind
+        self.data = data
+        self.textProjection = textProjection
+    }
+}
+
+public enum ClipRepresentationError: Error, Equatable {
+    case invalidByteSize(expected: Int, actual: Int)
+}
+
+public struct ClipRepresentation: Codable, Equatable, Sendable {
+    public let kind: RepresentationKind
+    public let originalBytes: Data
+    public let byteSize: Int
+    public let keyedDigest: Data
+
+    public init(kind: RepresentationKind, originalBytes: Data, keyedDigest: Data) {
+        self.kind = kind
+        self.originalBytes = originalBytes
+        byteSize = originalBytes.count
+        self.keyedDigest = keyedDigest
+    }
+
+    public init(kind: RepresentationKind, originalBytes: Data, byteSize: Int, keyedDigest: Data) throws {
+        guard byteSize == originalBytes.count else {
+            throw ClipRepresentationError.invalidByteSize(expected: originalBytes.count, actual: byteSize)
+        }
+        self.kind = kind
+        self.originalBytes = originalBytes
+        self.byteSize = byteSize
+        self.keyedDigest = keyedDigest
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case originalBytes
+        case byteSize
+        case keyedDigest
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try values.decode(RepresentationKind.self, forKey: .kind)
+        let originalBytes = try values.decode(Data.self, forKey: .originalBytes)
+        let byteSize = try values.decode(Int.self, forKey: .byteSize)
+        let keyedDigest = try values.decode(Data.self, forKey: .keyedDigest)
+        try self.init(kind: kind, originalBytes: originalBytes, byteSize: byteSize, keyedDigest: keyedDigest)
+    }
+}
+
+public struct ResolvedTextContent: Codable, Equatable, Sendable {
+    public let insertionString: String
+    public let originals: [RawTextRepresentation]
+
+    public init(insertionString: String, originals: [RawTextRepresentation]) {
+        self.insertionString = insertionString
+        self.originals = originals
+    }
+}
+
+public struct ClipEnvelope: Codable, Equatable, Sendable {
+    public let id: UUID
+    public let capturedAt: Date
+    public let retentionClass: RetentionClass
+    public let sourceConfidence: SourceConfidence
+    public let representations: [ClipRepresentation]
+    public let canonicalInsertionString: String
+    public let title: String
+    public let contentKind: ContentKind
+    public let category: ClipCategory?
+    public let preview: String
+    public let valueCandidates: [ValueCandidate]
+
+    public init(
+        id: UUID,
+        capturedAt: Date,
+        retentionClass: RetentionClass,
+        sourceConfidence: SourceConfidence,
+        representations: [ClipRepresentation],
+        canonicalInsertionString: String,
+        title: String,
+        contentKind: ContentKind,
+        category: ClipCategory?,
+        preview: String,
+        valueCandidates: [ValueCandidate]
+    ) {
+        self.id = id
+        self.capturedAt = capturedAt
+        self.retentionClass = retentionClass
+        self.sourceConfidence = sourceConfidence
+        self.representations = representations
+        self.canonicalInsertionString = canonicalInsertionString
+        self.title = title
+        self.contentKind = contentKind
+        self.category = category
+        self.preview = preview
+        self.valueCandidates = valueCandidates
+    }
+}

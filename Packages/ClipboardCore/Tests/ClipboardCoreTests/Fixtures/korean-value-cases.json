@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "positive": [
+    {
+      "source": "연락처는 010-1234-5678 입니다",
+      "kind": "phoneNumber",
+      "original": "010-1234-5678"
+    },
+    {
+      "source": "문의: hello@example.kr",
+      "kind": "emailAddress",
+      "original": "hello@example.kr"
+    },
+    {
+      "source": "안내 https://example.kr/path?q=값 확인",
+      "kind": "url",
+      "original": "https://example.kr/path?q=값"
+    },
+    {
+      "source": "인증번호 482913을 입력하세요",
+      "kind": "oneTimeCode",
+      "original": "482913"
+    },
+    {
+      "source": "입금 계좌 123-456-789012 입니다",
+      "kind": "accountNumber",
+      "original": "123-456-789012"
+    },
+    {
+      "source": "입금 계좌 12-345-678 입니다",
+      "kind": "accountNumber",
+      "original": "12-345-678"
+    },
+    {
+      "source": "국민은행으로 987654321012 보내 주세요",
+      "kind": "accountNumber",
+      "original": "987654321012"
+    }
+  ],
+  "negative": [
+    {
+      "source": "주문번호 123-456-789012",
+      "forbiddenKind": "accountNumber"
+    },
+    {
+      "source": "입금 후 주문번호 12-34",
+      "forbiddenKind": "accountNumber"
+    },
+    {
+      "source": "입금 후 주문번호 123-456-789012",
+      "forbiddenKind": "accountNumber"
+    },
+    {
+      "source": "입금 후 주문 번호 12-345-678",
+      "forbiddenKind": "accountNumber"
+    },
+    {
+      "source": "입금 계좌 12-34",
+      "forbiddenKind": "accountNumber"
+    },
+    {
+      "source": "참조값 123456789012",
+      "forbiddenKind": "accountNumber"
+    },
+    {
+      "source": "우리 팀 식별값 123456789012 확인",
+      "forbiddenKind": "accountNumber"
+    },
+    {
+      "source": "하나 남은 추적값 9876543210 확인",
+      "forbiddenKind": "accountNumber"
+    },
+    {
+      "source": "기업 고객 식별값 456789012345 확인",
+      "forbiddenKind": "accountNumber"
+    },
+    {
+      "source": "오늘 번호는 482913입니다",
+      "forbiddenKind": "oneTimeCode"
+    },
+    {
+      "source": "할인 코드 482913을 적용하세요",
+      "forbiddenKind": "oneTimeCode"
+    }
+  ]
+}

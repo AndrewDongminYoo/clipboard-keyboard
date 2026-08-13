@@ -8,6 +8,10 @@ let package = Package(
     ],
     targets: [
         .target(name: "ClipboardCore"),
-        .testTarget(name: "ClipboardCoreTests", dependencies: ["ClipboardCore"]),
+        .testTarget(
+            name: "ClipboardCoreTests",
+            dependencies: ["ClipboardCore"],
+            resources: [.copy("Fixtures")]
+        ),
     ]
 )
