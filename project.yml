@@ -1,0 +1,170 @@
+name: ClipboardKeyboard
+
+options:
+  minimumXcodeGenVersion: 2.46.0
+  deploymentTarget:
+    iOS: 17.0
+    macOS: 14.0
+
+configFiles:
+  Debug: Config/Debug.xcconfig
+  Release: Config/Release.xcconfig
+
+packages:
+  ClipboardCore:
+    path: Packages/ClipboardCore
+
+targetTemplates:
+  SharedTarget:
+    configFiles:
+      Debug: Config/Debug.xcconfig
+      Release: Config/Release.xcconfig
+    dependencies:
+      - package: ClipboardCore
+        product: ClipboardCore
+
+targets:
+  ClipboardKeyboardMac:
+    templates:
+      - SharedTarget
+    type: application
+    platform: macOS
+    sources:
+      - Apps/macOS/App
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.andrewdongminyoo.clipboardkeyboard.mac
+    info:
+      path: ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardMac-Info.plist
+      properties:
+        CFBundleDisplayName: Clipboard Keyboard
+
+  ClipboardKeyboardiOS:
+    templates:
+      - SharedTarget
+    type: application
+    platform: iOS
+    sources:
+      - Apps/iOS/App
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.andrewdongminyoo.clipboardkeyboard.ios
+    dependencies:
+      - target: ClipboardKeyboardKeyboard
+        embed: true
+      - target: ClipboardKeyboardShare
+        embed: true
+    info:
+      path: ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardiOS-Info.plist
+      properties:
+        CFBundleDisplayName: Clipboard Keyboard
+
+  ClipboardKeyboardKeyboard:
+    templates:
+      - SharedTarget
+    type: app-extension
+    platform: iOS
+    sources:
+      - Extensions/Keyboard
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.andrewdongminyoo.clipboardkeyboard.ios.keyboard
+    info:
+      path: ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardKeyboard-Info.plist
+      properties:
+        CFBundleDisplayName: Clipboard Keyboard
+        NSExtension:
+          NSExtensionAttributes:
+            RequestsOpenAccess: false
+          NSExtensionPointIdentifier: com.apple.keyboard-service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).KeyboardViewController
+
+  ClipboardKeyboardShare:
+    templates:
+      - SharedTarget
+    type: app-extension
+    platform: iOS
+    sources:
+      - Extensions/Share
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.andrewdongminyoo.clipboardkeyboard.ios.share
+    info:
+      path: ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardShare-Info.plist
+      properties:
+        CFBundleDisplayName: Clipboard Keyboard
+        NSExtension:
+          NSExtensionAttributes:
+            NSExtensionActivationRule: FALSEPREDICATE
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+
+  ClipboardKeyboardMacTests:
+    templates:
+      - SharedTarget
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/macOS
+    dependencies:
+      - target: ClipboardKeyboardMac
+
+  ClipboardKeyboardiOSTests:
+    templates:
+      - SharedTarget
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/iOS
+    dependencies:
+      - target: ClipboardKeyboardiOS
+
+  ClipboardKeyboardKeyboardTests:
+    templates:
+      - SharedTarget
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/Keyboard
+    dependencies:
+      - target: ClipboardKeyboardKeyboard
+
+  ClipboardKeyboardShareTests:
+    templates:
+      - SharedTarget
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/Share
+    dependencies:
+      - target: ClipboardKeyboardShare
+
+schemes:
+  ClipboardKeyboardMac:
+    build:
+      targets:
+        ClipboardKeyboardMac: all
+    test:
+      targets:
+        - ClipboardKeyboardMacTests
+  ClipboardKeyboardiOS:
+    build:
+      targets:
+        ClipboardKeyboardiOS: all
+    test:
+      targets:
+        - ClipboardKeyboardiOSTests
+  ClipboardKeyboardKeyboard:
+    build:
+      targets:
+        ClipboardKeyboardKeyboard: all
+    test:
+      targets:
+        - ClipboardKeyboardKeyboardTests
+  ClipboardKeyboardShare:
+    build:
+      targets:
+        ClipboardKeyboardShare: all
+    test:
+      targets:
+        - ClipboardKeyboardShareTests
