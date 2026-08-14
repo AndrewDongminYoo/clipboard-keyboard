@@ -4,6 +4,7 @@ import SwiftUI
 struct PaletteView: View {
     @ObservedObject var model: PaletteViewModel
     let settings: MacSettingsModel
+    @ObservedObject var fallback: PrivateCopyFallbackState
 
     var body: some View {
         VStack(spacing: 10) {
@@ -22,6 +23,12 @@ struct PaletteView: View {
             if let status = model.statusMessage {
                 Text(status).font(.caption).foregroundStyle(.secondary)
             }
+            if let failure = fallback.message {
+                HStack {
+                    Text(failure).font(.caption).foregroundStyle(.red)
+                    Button(fallback.actionTitle) { settings.pauseCaptureFor60Seconds() }
+                }
+            }
             List(model.items, selection: Binding(
                 get: { model.selectedItemID },
                 set: { model.select(id: $0) }
@@ -37,13 +44,23 @@ struct PaletteView: View {
                 Task { await model.handle(direction == .up ? .upArrow : .downArrow) }
             }
             HStack {
+                Button("Import and Pin") { Task { await model.importAndPin() } }
                 Button("Pin") { Task { await model.pinSelected() } }
                 Menu("Copy As") {
                     ForEach(CopyFormat.allCases, id: \.self) { format in
                         Button(format.rawValue) { Task { await model.copySelected(as: format) } }
                     }
                 }
-                Button("Export") { Task { await model.exportSelected() } }
+                Menu("Export") {
+                    ForEach(MacClipDocumentFormat.allCases, id: \.self) { format in
+                        Button(format.rawValue.uppercased()) { Task { await model.exportSelected(as: format) } }
+                    }
+                }
+                Menu("Share") {
+                    ForEach(MacClipDocumentFormat.allCases, id: \.self) { format in
+                        Button(format.rawValue.uppercased()) { Task { await model.shareSelected(as: format) } }
+                    }
+                }
                 Button("Delete") { Task { await model.deleteSelected() } }
                 Button("Pause Capture for 60 Seconds") { settings.pauseCaptureFor60Seconds() }
                 SettingsLink { Text("Settings") }
@@ -51,6 +68,9 @@ struct PaletteView: View {
         }
         .padding(12)
         .frame(width: 520, height: 420)
+        .onKeyPress(.upArrow) { Task { await model.handle(.upArrow) }; return .handled }
+        .onKeyPress(.downArrow) { Task { await model.handle(.downArrow) }; return .handled }
+        .onKeyPress(.return) { Task { await model.handle(.returnKey) }; return .handled }
         .task { await model.search(scope: model.scope) }
     }
 }

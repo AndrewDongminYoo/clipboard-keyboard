@@ -1,7 +1,15 @@
-import AppKit
+@preconcurrency import AppKit
 import ClipboardCore
 import CryptoKit
 import Foundation
+
+@MainActor
+protocol MacCaptureWatching: AnyObject {
+    func start(poll: @escaping @MainActor () async -> Void)
+    func stop()
+}
+
+extension PasteboardWatcher: MacCaptureWatching {}
 
 @MainActor
 final class MacAppModel: ObservableObject {
@@ -18,7 +26,10 @@ final class MacAppModel: ObservableObject {
     private let historyRoot: URL?
     private let historyKey: SymmetricKey?
     private var captureCoordinator: ClipboardCaptureCoordinator?
-    private let watcher = PasteboardWatcher()
+    private let watcher: any MacCaptureWatching
+    private let capturePasteboard: any MacPasteboardReading
+    private let sourceTracker: any SourceObservationTracking
+    private let now: () -> Date
     private let digestProvider: ((Data) throws -> Data)?
 
     private init(
@@ -30,7 +41,11 @@ final class MacAppModel: ObservableObject {
         liveDataSource: LivePaletteDataSource?,
         historyRoot: URL?,
         historyKey: SymmetricKey?,
-        digestProvider: ((Data) throws -> Data)?
+        digestProvider: ((Data) throws -> Data)?,
+        watcher: any MacCaptureWatching = PasteboardWatcher(),
+        capturePasteboard: any MacPasteboardReading = MacPasteboardClient(),
+        sourceTracker: any SourceObservationTracking = SourceObservationTracker(),
+        now: @escaping () -> Date = Date.init
     ) {
         self.settings = settings
         self.shortcut = shortcut
@@ -41,11 +56,19 @@ final class MacAppModel: ObservableObject {
         self.historyRoot = historyRoot
         self.historyKey = historyKey
         self.digestProvider = digestProvider
-        panelController = PalettePanelController(viewModel: paletteViewModel, settings: settings)
+        self.watcher = watcher
+        self.capturePasteboard = capturePasteboard
+        self.sourceTracker = sourceTracker
+        self.now = now
+        panelController = PalettePanelController(viewModel: paletteViewModel, settings: settings, fallback: privateCopyFallback)
         statusItemController = StatusItemController(panelController: panelController)
         shortcut.setHandler { [weak panelController] in panelController?.toggle() }
         settings.captureConsentChanged = { [weak self] enabled in self?.configureCapture(enabled: enabled) }
         settings.retentionChanged = { [weak self] retention in self?.updateRetention(retention) }
+        settings.ignoredApplicationsChanged = { [weak self] in
+            guard let self else { return }
+            self.configureCapture(enabled: self.settings.captureConsentGranted)
+        }
         settings.capturePauseChanged = { [weak self] duration in
             if let duration {
                 self?.captureCoordinator?.pauseCapture(for: duration)
@@ -53,6 +76,7 @@ final class MacAppModel: ObservableObject {
                 self?.captureCoordinator?.resumeCapture()
             }
         }
+        privateCopyService.failureHandler = { [weak self] in self?.privateCopyFallback.serviceDidFail() }
     }
 
     static func makeLive() -> MacAppModel {
@@ -62,10 +86,18 @@ final class MacAppModel: ObservableObject {
         do {
             let key = try MacKeychainMasterKeyStore().loadOrCreateKey()
             let root = try applicationSupportRoot()
+            let digest: @Sendable (Data) throws -> Data = { data in
+                Data(HMAC<SHA256>.authenticationCode(for: data, using: key))
+            }
+            let retained = settings.retention
             let historyStore = EncryptedMacClipStore(
                 rootURL: root.appendingPathComponent("History", isDirectory: true),
                 cipher: AESGCMClipCipher(key: key),
-                retentionPolicy: RetentionPolicy(maxAge: 24 * 60 * 60, maxUnpinnedCount: 200, historyEnabled: true)
+                retentionPolicy: RetentionPolicy(
+                    maxAge: TimeInterval(retained.maxAgeHours * 3600),
+                    maxUnpinnedCount: retained.maxItemCount,
+                    historyEnabled: retained.historyEnabled
+                )
             )
             let pinnedStore = EncryptedMacPinnedStore(
                 fileURL: root.appendingPathComponent("Pinned/pinned-replica.encrypted"),
@@ -79,11 +111,10 @@ final class MacAppModel: ObservableObject {
             let viewModel = PaletteViewModel(
                 dataSource: dataSource,
                 pasteboardWriter: LivePalettePasteboardWriter(),
-                exporter: MacPaletteExporter()
+                exporter: MacPaletteExporter(),
+                importer: MacPaletteImporter(library: pinnedLibrary, digestProvider: digest),
+                sharer: MacPaletteSharer()
             )
-            let digest: (Data) throws -> Data = { data in
-                Data(HMAC<SHA256>.authenticationCode(for: data, using: key))
-            }
             return MacAppModel(
                 settings: settings,
                 shortcut: shortcut,
@@ -115,9 +146,10 @@ final class MacAppModel: ObservableObject {
     }
 
     func start() {
-        if !shortcut.registerDefault() {
+        if !shortcut.update(to: settings.paletteShortcut) {
             privateCopyFallback.shortcutDidConflict()
         }
+        configureCapture(enabled: settings.captureConsentGranted)
     }
 
     func pauseCaptureFor60Seconds() {
@@ -127,16 +159,25 @@ final class MacAppModel: ObservableObject {
     private func configureCapture(enabled: Bool) {
         watcher.stop()
         captureCoordinator = nil
-        guard enabled, let historyStore, let digestProvider else { return }
+        guard enabled, settings.retention.historyEnabled, let historyStore, let digestProvider else { return }
         let coordinator = ClipboardCaptureCoordinator(
-            pasteboard: MacPasteboardClient(),
-            sourceTracker: SourceObservationTracker(),
+            pasteboard: capturePasteboard,
+            sourceTracker: sourceTracker,
             policy: .standard(
                 consentGranted: true,
                 ignoredApplications: Set(settings.ignoredApplications.map(\.identity))
             ),
             envelopeBuilder: MacClipEnvelopeBuilder(digestProvider: digestProvider),
-            commit: { envelope in try await historyStore.save(envelope) }
+            commit: { [weak self] envelope in
+                do {
+                    try await historyStore.save(envelope)
+                    _ = try await historyStore.applyRetention(now: self?.now() ?? Date())
+                } catch {
+                    self?.settings.protectedStorageLocked = true
+                    throw error
+                }
+            },
+            now: now
         )
         captureCoordinator = coordinator
         let remainingPause = settings.capturePauseSecondsRemaining
@@ -159,8 +200,34 @@ final class MacAppModel: ObservableObject {
         )
         historyStore = store
         liveDataSource.replaceHistoryStore(store)
-        Task { try? await store.applyRetention(now: Date()) }
+        Task { [weak self] in
+            do {
+                _ = try await store.applyRetention(now: self?.now() ?? Date())
+            } catch {
+                self?.settings.protectedStorageLocked = true
+            }
+        }
         configureCapture(enabled: settings.captureConsentGranted)
+    }
+
+    static func makeForTesting(
+        settings: MacSettingsModel,
+        shortcut: GlobalPaletteShortcut,
+        privateCopyService: PrivateCopyService,
+        paletteViewModel: PaletteViewModel,
+        historyStore: EncryptedMacClipStore,
+        digestProvider: @escaping (Data) throws -> Data,
+        watcher: any MacCaptureWatching,
+        capturePasteboard: any MacPasteboardReading,
+        sourceTracker: any SourceObservationTracking,
+        now: @escaping () -> Date = Date.init
+    ) -> MacAppModel {
+        MacAppModel(
+            settings: settings, shortcut: shortcut, privateCopyService: privateCopyService,
+            paletteViewModel: paletteViewModel, historyStore: historyStore, liveDataSource: nil,
+            historyRoot: nil, historyKey: nil, digestProvider: digestProvider, watcher: watcher,
+            capturePasteboard: capturePasteboard, sourceTracker: sourceTracker, now: now
+        )
     }
 
     private static func applicationSupportRoot() throws -> URL {
@@ -256,13 +323,78 @@ private final class LivePalettePasteboardWriter: PalettePasteboardWriting {
 
 @MainActor
 private final class MacPaletteExporter: PaletteExporting {
-    func export(_ item: PaletteItem) async throws {
-        guard let representation = item.representations.first,
-              let format = MacClipDocumentFormat.allCases.first(where: { $0.representationKind == representation.kind })
+    func export(_ item: PaletteItem, as format: MacClipDocumentFormat) async throws {
+        guard let representation = item.representations.first(where: { $0.kind == format.representationKind })
         else { throw MacClipDocumentError.malformedDocument }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "Clipboard Item.\(format.rawValue)"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         try MacImportExportController().export(.init(format: format, bytes: representation.originalBytes), to: url)
+    }
+}
+
+@MainActor
+private final class MacPaletteImporter: PaletteImporting {
+    private let library: any PinnedLibrary
+    private let controller: MacImportExportController
+
+    init(library: any PinnedLibrary, digestProvider: @escaping @Sendable (Data) throws -> Data) {
+        self.library = library
+        controller = MacImportExportController(digestProvider: digestProvider)
+    }
+
+    func importAndPin() async throws {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.plainText, .rtf, .html]
+        guard panel.runModal() == .OK, let url = panel.url,
+              let format = MacClipDocumentFormat(rawValue: url.pathExtension.lowercased())
+        else { return }
+        let document = try controller.importDocument(at: url, as: format)
+        _ = try await controller.pinImportedDocument(document, title: "Imported Clipboard Item", using: library)
+    }
+}
+
+@MainActor
+private final class MacPaletteSharer: NSObject, PaletteSharing, @preconcurrency NSSharingServicePickerDelegate, NSSharingServiceDelegate {
+    private let controller = MacImportExportController()
+    private var temporaryURL: URL?
+    private var picker: NSSharingServicePicker?
+
+    func share(_ item: PaletteItem, as format: MacClipDocumentFormat) async throws {
+        guard let representation = item.representations.first(where: { $0.kind == format.representationKind }),
+              let view = NSApplication.shared.keyWindow?.contentView
+        else { throw MacClipDocumentError.malformedDocument }
+        cleanup()
+        let url = try controller.prepareTemporaryExport(.init(format: format, bytes: representation.originalBytes))
+        temporaryURL = url
+        let picker = NSSharingServicePicker(items: [url])
+        self.picker = picker
+        picker.delegate = self
+        picker.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
+    }
+
+    func sharingServicePicker(_: NSSharingServicePicker, didChoose service: NSSharingService?) {
+        guard let service else {
+            cleanup()
+            return
+        }
+        service.delegate = self
+    }
+
+    func sharingService(_: NSSharingService, didShareItems _: [Any]) {
+        cleanup()
+    }
+
+    func sharingService(_: NSSharingService, didFailToShareItems _: [Any], error _: any Error) {
+        cleanup()
+    }
+
+    private func cleanup() {
+        if let temporaryURL {
+            try? controller.cancelTemporaryExport(temporaryURL)
+        }
+        temporaryURL = nil
+        picker = nil
     }
 }

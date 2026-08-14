@@ -41,13 +41,26 @@ protocol PalettePasteboardWriting: AnyObject {
 
 @MainActor
 protocol PaletteExporting: AnyObject {
-    func export(_ item: PaletteItem) async throws
+    func export(_ item: PaletteItem, as format: MacClipDocumentFormat) async throws
+}
+
+@MainActor
+protocol PaletteImporting: AnyObject {
+    func importAndPin() async throws
+}
+
+@MainActor
+protocol PaletteSharing: AnyObject {
+    func share(_ item: PaletteItem, as format: MacClipDocumentFormat) async throws
 }
 
 @MainActor
 final class NoopPaletteExporter: PaletteExporting {
-    func export(_: PaletteItem) async throws {}
+    func export(_: PaletteItem, as _: MacClipDocumentFormat) async throws {}
 }
+
+@MainActor final class NoopPaletteImporter: PaletteImporting { func importAndPin() async throws {} }
+@MainActor final class NoopPaletteSharer: PaletteSharing { func share(_: PaletteItem, as _: MacClipDocumentFormat) async throws {} }
 
 @MainActor
 final class PaletteViewModel: ObservableObject {
@@ -61,15 +74,21 @@ final class PaletteViewModel: ObservableObject {
     private let dataSource: any PaletteDataSource
     private let pasteboardWriter: any PalettePasteboardWriting
     private let exporter: any PaletteExporting
+    private let importer: any PaletteImporting
+    private let sharer: any PaletteSharing
 
     init(
         dataSource: any PaletteDataSource,
         pasteboardWriter: any PalettePasteboardWriting,
-        exporter: any PaletteExporting = NoopPaletteExporter()
+        exporter: any PaletteExporting = NoopPaletteExporter(),
+        importer: any PaletteImporting = NoopPaletteImporter(),
+        sharer: any PaletteSharing = NoopPaletteSharer()
     ) {
         self.dataSource = dataSource
         self.pasteboardWriter = pasteboardWriter
         self.exporter = exporter
+        self.importer = importer
+        self.sharer = sharer
     }
 
     func search(scope: PaletteScope) async {
@@ -135,13 +154,37 @@ final class PaletteViewModel: ObservableObject {
         }
     }
 
-    func exportSelected() async {
+    func exportSelected(as format: MacClipDocumentFormat) async {
         guard let item = selectedItem else { return }
         do {
-            try await exporter.export(item)
+            try await exporter.export(item, as: format)
             statusMessage = nil
         } catch {
             statusMessage = "Export Failed"
+        }
+    }
+
+    func prepareForPresentation() {
+        shouldClose = false
+    }
+
+    func importAndPin() async {
+        do {
+            try await importer.importAndPin()
+            statusMessage = "Sync Pending"
+            await search(scope: .pinned)
+        } catch {
+            statusMessage = "Import Failed"
+        }
+    }
+
+    func shareSelected(as format: MacClipDocumentFormat) async {
+        guard let item = selectedItem else { return }
+        do {
+            try await sharer.share(item, as: format)
+            statusMessage = nil
+        } catch {
+            statusMessage = "Share Failed"
         }
     }
 

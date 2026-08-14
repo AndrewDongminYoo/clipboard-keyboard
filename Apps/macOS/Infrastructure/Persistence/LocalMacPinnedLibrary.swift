@@ -37,80 +37,83 @@ actor LocalMacPinnedLibrary: PinnedLibrary {
     }
 
     func pin(_ payload: PinPayload) async throws -> PinnedRevision {
-        let state = try await store.load()
-        let revision = PinnedRevision(
-            itemID: UUID(),
-            revisionID: UUID(),
-            libraryGeneration: state.libraryGeneration,
-            itemGeneration: 1,
-            modifiedAt: now(),
-            deviceID: deviceID,
-            payload: payload
-        )
-        try await applyLocal(.revision(revision), to: state)
-        return revision
+        let itemID = UUID()
+        let revisionID = UUID()
+        let modifiedAt = now()
+        let deviceID = deviceID
+        return try await store.transaction { state in
+            let revision = PinnedRevision(
+                itemID: itemID, revisionID: revisionID, libraryGeneration: state.libraryGeneration,
+                itemGeneration: 1, modifiedAt: modifiedAt, deviceID: deviceID, payload: payload
+            )
+            Self.applyLocal(.revision(revision), to: &state)
+            return revision
+        }
     }
 
     func revise(itemID: UUID, payload: PinPayload) async throws -> PinnedRevision {
-        let state = try await store.load()
-        guard let current = state.primaryRevisions.first(where: { $0.itemID == itemID }) else {
-            throw LocalMacPinnedLibraryError.itemNotFound
+        let revisionID = UUID()
+        let modifiedAt = now()
+        let deviceID = deviceID
+        return try await store.transaction { state in
+            guard let current = state.primaryRevisions.first(where: { $0.itemID == itemID }) else {
+                throw LocalMacPinnedLibraryError.itemNotFound
+            }
+            let revision = PinnedRevision(
+                itemID: itemID, revisionID: revisionID, libraryGeneration: state.libraryGeneration,
+                itemGeneration: current.itemGeneration + 1, modifiedAt: modifiedAt, deviceID: deviceID, payload: payload
+            )
+            Self.applyLocal(.revision(revision), to: &state)
+            return revision
         }
-        let revision = PinnedRevision(
-            itemID: itemID,
-            revisionID: UUID(),
-            libraryGeneration: state.libraryGeneration,
-            itemGeneration: current.itemGeneration + 1,
-            modifiedAt: now(),
-            deviceID: deviceID,
-            payload: payload
-        )
-        try await applyLocal(.revision(revision), to: state)
-        return revision
     }
 
     func delete(itemID: UUID) async throws -> PinnedTombstone {
-        let state = try await store.load()
-        guard let current = state.primaryRevisions.first(where: { $0.itemID == itemID }) else {
-            throw LocalMacPinnedLibraryError.itemNotFound
+        let tombstoneID = UUID()
+        let modifiedAt = now()
+        let deviceID = deviceID
+        return try await store.transaction { state in
+            guard let current = state.primaryRevisions.first(where: { $0.itemID == itemID }) else {
+                throw LocalMacPinnedLibraryError.itemNotFound
+            }
+            let tombstone = PinnedTombstone(
+                itemID: itemID, tombstoneID: tombstoneID, libraryGeneration: state.libraryGeneration,
+                itemGeneration: current.itemGeneration + 1, modifiedAt: modifiedAt, deviceID: deviceID
+            )
+            Self.applyLocal(.tombstone(tombstone), to: &state)
+            return tombstone
         }
-        let tombstone = PinnedTombstone(
-            itemID: itemID,
-            tombstoneID: UUID(),
-            libraryGeneration: state.libraryGeneration,
-            itemGeneration: current.itemGeneration + 1,
-            modifiedAt: now(),
-            deviceID: deviceID
-        )
-        try await applyLocal(.tombstone(tombstone), to: state)
-        return tombstone
     }
 
     func applyRemote(_ mutation: PinnedMutation) async throws -> MergeOutcome {
-        var replica = try PinnedReplica(state: await store.load())
-        let outcome = replica.apply(mutation)
-        try await store.save(replica.state)
-        return outcome
+        try await store.transaction { state in
+            var replica = PinnedReplica(state: state)
+            let outcome = replica.apply(mutation)
+            state = replica.state
+            return outcome
+        }
     }
 
     func advanceResetGeneration() async throws -> LibraryResetGeneration {
-        let state = try await store.load()
-        let reset = LibraryResetGeneration(
-            resetID: UUID(),
-            generation: state.libraryGeneration + 1,
-            modifiedAt: now(),
-            deviceID: deviceID
-        )
-        try await applyLocal(.reset(reset), to: state)
-        return reset
+        let resetID = UUID()
+        let modifiedAt = now()
+        let deviceID = deviceID
+        return try await store.transaction { state in
+            let reset = LibraryResetGeneration(
+                resetID: resetID, generation: state.libraryGeneration + 1,
+                modifiedAt: modifiedAt, deviceID: deviceID
+            )
+            Self.applyLocal(.reset(reset), to: &state)
+            return reset
+        }
     }
 
-    private func applyLocal(_ mutation: PinnedMutation, to state: PinnedReplicaState) async throws {
+    private static func applyLocal(_ mutation: PinnedMutation, to state: inout PinnedReplicaState) {
         var replica = PinnedReplica(state: state)
         _ = replica.apply(mutation)
         var journal = replica.state.pendingJournal
         journal.enqueue(mutation)
-        let persisted = PinnedReplicaState(
+        state = PinnedReplicaState(
             libraryGeneration: replica.state.libraryGeneration,
             reset: replica.state.reset,
             primaryRevisions: replica.state.primaryRevisions,
@@ -119,7 +122,6 @@ actor LocalMacPinnedLibrary: PinnedLibrary {
             seenMutationIDs: replica.state.seenMutationIDs,
             pendingJournal: journal
         )
-        try await store.save(persisted)
     }
 
     private func normalize(_ value: String) -> String {

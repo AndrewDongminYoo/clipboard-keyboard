@@ -57,6 +57,50 @@ final class LocalMacPinnedLibraryTests: XCTestCase {
         }
     }
 
+    func testConcurrentPinsAreCommittedWithoutLostItemsOrJournalEntries() async throws {
+        let fileURL = temporaryFileURL()
+        defer { try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent()) }
+        let store = EncryptedMacPinnedStore(fileURL: fileURL, key: SymmetricKey(data: Data(repeating: 4, count: 32)))
+        let library = LocalMacPinnedLibrary(store: store, deviceID: "concurrent-test")
+
+        let firstPayload = payload(text: "concurrent-one", title: "One")
+        let secondPayload = payload(text: "concurrent-two", title: "Two")
+        async let first = library.pin(firstPayload)
+        async let second = library.pin(secondPayload)
+        _ = try await (first, second)
+
+        let state = try await store.load()
+        XCTAssertEqual(Set(state.primaryRevisions.map(\.payload.title)), ["One", "Two"])
+        XCTAssertEqual(state.pendingJournal.pending.count, 2)
+    }
+
+    func testInterleavedReviseDeleteResetAndRemoteMutationsRemainSerialized() async throws {
+        let fileURL = temporaryFileURL()
+        defer { try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent()) }
+        let store = EncryptedMacPinnedStore(fileURL: fileURL, key: SymmetricKey(data: Data(repeating: 5, count: 32)))
+        let library = LocalMacPinnedLibrary(store: store, deviceID: "serialized-test", now: { Date(timeIntervalSince1970: 200) })
+        let revisedItem = try await library.pin(payload(text: "revise-before", title: "Revise"))
+        let deletedItem = try await library.pin(payload(text: "delete-before", title: "Delete"))
+        let remote = PinnedRevision(
+            itemID: UUID(), revisionID: UUID(), libraryGeneration: 0, itemGeneration: 1,
+            modifiedAt: Date(timeIntervalSince1970: 201), deviceID: "remote",
+            payload: payload(text: "remote-value", title: "Remote")
+        )
+
+        let revisedPayload = payload(text: "revise-after", title: "Revised")
+        async let revised = library.revise(itemID: revisedItem.itemID, payload: revisedPayload)
+        async let deleted = library.delete(itemID: deletedItem.itemID)
+        async let merged = library.applyRemote(.revision(remote))
+        _ = try await (revised, deleted, merged)
+        let reset = try await library.advanceResetGeneration()
+
+        let state = try await store.load()
+        XCTAssertEqual(reset.generation, 1)
+        XCTAssertEqual(state.libraryGeneration, 1)
+        XCTAssertTrue(state.seenMutationIDs.contains(remote.revisionID))
+        XCTAssertEqual(state.pendingJournal.pending.last?.mutationID, reset.resetID)
+    }
+
     private func payload(text: String, title: String) -> PinPayload {
         PinPayload(
             representations: [.init(kind: .plainText, originalBytes: Data(text.utf8), keyedDigest: Data([1]))],

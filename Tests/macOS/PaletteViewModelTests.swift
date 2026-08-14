@@ -45,10 +45,44 @@ final class PaletteViewModelTests: XCTestCase {
 
         await model.pinSelected()
         XCTAssertEqual(source.pinnedPayloads.map(\.canonicalInsertionString), ["first"])
-        await model.exportSelected()
-        XCTAssertEqual(exporter.exportedIDs, [first.id])
+        await model.exportSelected(as: .rtf)
+        XCTAssertEqual(exporter.exports.map(\.item.id), [first.id])
+        XCTAssertEqual(exporter.exports.map(\.format), [.rtf])
         await model.deleteSelected()
         XCTAssertEqual(source.deletedRecentIDs, [first.id])
+    }
+
+    func testRepeatedPresentationReturnCopiesAndClosesEachTime() async {
+        let item = makeEnvelope(text: "repeat", capturedAt: 1)
+        let writer = PalettePasteboardWriterSpy()
+        let model = PaletteViewModel(dataSource: PaletteDataSourceStub(recent: [item], pinned: []), pasteboardWriter: writer)
+        await model.search(scope: .recent)
+
+        model.prepareForPresentation()
+        await model.handle(.returnKey)
+        model.prepareForPresentation()
+        await model.handle(.returnKey)
+
+        XCTAssertEqual(writer.writeCount, 2)
+        XCTAssertTrue(model.shouldClose)
+    }
+
+    func testImportAndShareAreWiredThroughPaletteCompositionWithExplicitFormat() async {
+        let item = makeEnvelope(text: "share", capturedAt: 1)
+        let importer = PaletteImporterSpy()
+        let sharer = PaletteSharerSpy()
+        let model = PaletteViewModel(
+            dataSource: PaletteDataSourceStub(recent: [item], pinned: []),
+            pasteboardWriter: PalettePasteboardWriterSpy(),
+            importer: importer,
+            sharer: sharer
+        )
+        await model.search(scope: .recent)
+        await model.importAndPin()
+        await model.search(scope: .recent)
+        await model.shareSelected(as: .html)
+        XCTAssertEqual(importer.callCount, 1)
+        XCTAssertEqual(sharer.formats, [.html])
     }
 
     private func makeEnvelope(text: String, capturedAt: TimeInterval) -> ClipEnvelope {
@@ -91,6 +125,20 @@ final class PaletteViewModelTests: XCTestCase {
     }
 }
 
+@MainActor private final class PaletteImporterSpy: PaletteImporting {
+    private(set) var callCount = 0
+    func importAndPin() async throws {
+        callCount += 1
+    }
+}
+
+@MainActor private final class PaletteSharerSpy: PaletteSharing {
+    private(set) var formats: [MacClipDocumentFormat] = []
+    func share(_: PaletteItem, as format: MacClipDocumentFormat) async throws {
+        formats.append(format)
+    }
+}
+
 @MainActor
 private final class PaletteDataSourceStub: PaletteDataSource {
     let recent: [ClipEnvelope]
@@ -128,15 +176,17 @@ private final class PaletteDataSourceStub: PaletteDataSource {
 @MainActor
 private final class PalettePasteboardWriterSpy: PalettePasteboardWriting {
     private(set) var lastWrite: [ClipRepresentation]?
+    private(set) var writeCount = 0
     func write(_ representations: [ClipRepresentation]) throws {
+        writeCount += 1
         lastWrite = representations
     }
 }
 
 @MainActor
 private final class PaletteExporterSpy: PaletteExporting {
-    private(set) var exportedIDs: [UUID] = []
-    func export(_ item: PaletteItem) async throws {
-        exportedIDs.append(item.id)
+    private(set) var exports: [(item: PaletteItem, format: MacClipDocumentFormat)] = []
+    func export(_ item: PaletteItem, as format: MacClipDocumentFormat) async throws {
+        exports.append((item, format))
     }
 }

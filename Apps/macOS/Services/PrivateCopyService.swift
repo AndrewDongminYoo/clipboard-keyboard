@@ -40,6 +40,11 @@ final class PrivateCopyFallbackState: ObservableObject {
         message = "Private Copy was not handled"
     }
 
+    func serviceDidFail() {
+        didReportSuccess = false
+        message = "Private Copy could not complete"
+    }
+
     func shortcutDidConflict() {
         didReportSuccess = false
         message = "Private Copy shortcut conflict"
@@ -52,6 +57,7 @@ final class PrivateCopyService: NSObject {
 
     private let destination: any MacPasteboardReading
     private let shieldPresenter: any PrivateCopyShieldPresenting
+    var failureHandler: (@MainActor () -> Void)?
 
     init(
         destination: any MacPasteboardReading = MacPasteboardClient(),
@@ -62,10 +68,15 @@ final class PrivateCopyService: NSObject {
     }
 
     func performPrivateCopy(from source: any MacPasteboardReading) throws {
-        let metadata = source.readMetadata()
-        let representations = try source.readSupportedRepresentations(for: metadata.changeCount)
-        try destination.writeRepresentations(representations, marker: Self.markerTypeIdentifier)
-        shieldPresenter.showPrivateCopySucceeded()
+        do {
+            let metadata = source.readMetadata()
+            let representations = try source.readSupportedRepresentations(for: metadata.changeCount)
+            try destination.writeRepresentations(representations, marker: Self.markerTypeIdentifier)
+            shieldPresenter.showPrivateCopySucceeded()
+        } catch {
+            failureHandler?()
+            throw error
+        }
     }
 
     @objc(privateCopy:userData:error:)

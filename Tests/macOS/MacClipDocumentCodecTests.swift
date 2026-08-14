@@ -1,3 +1,4 @@
+import AppKit
 import ClipboardCore
 @testable import ClipboardKeyboardMac
 import CryptoKit
@@ -66,5 +67,25 @@ final class MacClipDocumentCodecTests: XCTestCase {
         XCTAssertEqual(revision.payload.representations.first?.kind, .markdown)
         XCTAssertEqual(revision.payload.representations.first?.originalBytes, original)
         XCTAssertEqual(revision.payload.representations.first?.keyedDigest, Data([5]))
+    }
+
+    func testRichImportsUseFormatSpecificCanonicalProjectionAndPreserveBytes() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let rtf = try NSAttributedString(string: "RTF canonical").data(
+            from: NSRange(location: 0, length: 13), documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+        )
+        let html = Data("<p>HTML <b>canonical</b></p>".utf8)
+        let store = EncryptedMacPinnedStore(fileURL: root.appendingPathComponent("pinned.encrypted"), key: SymmetricKey(data: Data(repeating: 8, count: 32)))
+        let library = LocalMacPinnedLibrary(store: store, deviceID: "projection")
+        let controller = MacImportExportController(temporaryDirectory: root, digestProvider: { _ in Data([9]) })
+
+        let rtfRevision = try await controller.pinImportedDocument(.init(format: .rtf, bytes: rtf), title: "RTF", using: library)
+        let htmlRevision = try await controller.pinImportedDocument(.init(format: .html, bytes: html), title: "HTML", using: library)
+        XCTAssertEqual(rtfRevision.payload.canonicalInsertionString, "RTF canonical")
+        XCTAssertEqual(rtfRevision.payload.representations.first?.originalBytes, rtf)
+        XCTAssertEqual(htmlRevision.payload.canonicalInsertionString, "HTML canonical")
+        XCTAssertEqual(htmlRevision.payload.representations.first?.originalBytes, html)
     }
 }

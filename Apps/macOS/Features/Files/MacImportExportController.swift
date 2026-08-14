@@ -5,6 +5,8 @@ struct MacImportExportController: Sendable {
     private let codec = MacClipDocumentCodec()
     private let temporaryDirectory: URL
     private let digestProvider: (@Sendable (Data) throws -> Data)?
+    private let rtfProjector = MacRTFTextProjector()
+    private let htmlProjector = HTMLTextProjector()
 
     init(
         temporaryDirectory: URL = FileManager.default.temporaryDirectory.appendingPathComponent("ClipboardKeyboard", isDirectory: true),
@@ -24,7 +26,7 @@ struct MacImportExportController: Sendable {
         using library: any PinnedLibrary
     ) async throws -> PinnedRevision {
         guard let digestProvider else { throw PersistenceSecurityError.keyUnavailable }
-        let text = String(data: document.bytes, encoding: .utf8) ?? ""
+        let text = try canonicalInsertionString(for: document)
         let payload = try PinPayload(
             representations: [
                 ClipRepresentation(
@@ -39,6 +41,20 @@ struct MacImportExportController: Sendable {
             category: nil
         )
         return try await library.pin(payload)
+    }
+
+    private func canonicalInsertionString(for document: MacClipDocument) throws -> String {
+        switch document.format {
+        case .rtf:
+            return try rtfProjector.project(document.bytes)
+        case .html:
+            return try htmlProjector.project(document.bytes)
+        case .txt, .md:
+            guard let text = String(data: document.bytes, encoding: .utf8) else {
+                throw MacClipDocumentError.malformedDocument
+            }
+            return text
+        }
     }
 
     func export(_ document: MacClipDocument, to destination: URL) throws {

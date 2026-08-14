@@ -75,4 +75,13 @@ actor EncryptedMacPinnedStore {
             throw PersistenceSecurityError.atomicReplaceFailed
         }
     }
+
+    func transaction<Result: Sendable>(
+        _ operation: @Sendable (inout PinnedReplicaState) throws -> Result
+    ) throws -> Result {
+        var state = try load()
+        let result = try operation(&state)
+        try save(state)
+        return result
+    }
 }

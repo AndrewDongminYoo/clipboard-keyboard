@@ -1,7 +1,7 @@
 import Carbon.HIToolbox
 import Foundation
 
-struct GlobalShortcutModifiers: OptionSet, Equatable, Sendable {
+struct GlobalShortcutModifiers: OptionSet, Equatable, Codable, Sendable {
     let rawValue: UInt32
 
     static let command = Self(rawValue: UInt32(cmdKey))
@@ -10,7 +10,7 @@ struct GlobalShortcutModifiers: OptionSet, Equatable, Sendable {
     static let control = Self(rawValue: UInt32(controlKey))
 }
 
-struct GlobalShortcutDefinition: Equatable, Sendable {
+struct GlobalShortcutDefinition: Equatable, Codable, Sendable {
     let keyCode: UInt32
     let modifiers: GlobalShortcutModifiers
 
