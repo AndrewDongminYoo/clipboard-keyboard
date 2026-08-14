@@ -17,7 +17,15 @@ protocol ShareFixedIDPinnedLibrary: PinnedLibrary {
     func ensurePinned(payload: PinPayload, itemID: UUID) async throws -> SharePinEnsureResult
 }
 
-actor LocalPinnedLibrary: ShareFixedIDPinnedLibrary {
+struct IntentPinCommit: Equatable, Sendable {
+    let libraryGeneration: Int64
+}
+
+protocol IntentPinCommittingLibrary: Sendable {
+    func pinForIntent(_ payload: PinPayload) async throws -> IntentPinCommit
+}
+
+actor LocalPinnedLibrary: ShareFixedIDPinnedLibrary, IntentPinCommittingLibrary {
     private let store: EncryptedPhonePinnedStore
     private let lease: ProtectedDataLease
     private let deviceID: String
@@ -109,6 +117,31 @@ actor LocalPinnedLibrary: ShareFixedIDPinnedLibrary {
         await beforeReturningMutation()
         try validateLifecycle(lifecycle)
         contentRevision &+= 1
+        return result
+    }
+
+    func pinForIntent(_ payload: PinPayload) async throws -> IntentPinCommit {
+        try Task.checkCancellation()
+        let itemID = UUID()
+        let revisionID = UUID()
+        let modifiedAt = now()
+        let deviceID = deviceID
+        let result = try await store.transaction { state in
+            try Task.checkCancellation()
+            let revision = PinnedRevision(
+                itemID: itemID,
+                revisionID: revisionID,
+                libraryGeneration: state.libraryGeneration,
+                itemGeneration: 1,
+                modifiedAt: modifiedAt,
+                deviceID: deviceID,
+                payload: payload
+            )
+            Self.applyLocal(.revision(revision), to: &state)
+            return IntentPinCommit(libraryGeneration: revision.libraryGeneration)
+        }
+        contentRevision &+= 1
+        await beforeReturningMutation()
         return result
     }
 

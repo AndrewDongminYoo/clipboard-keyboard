@@ -263,6 +263,25 @@ final class LocalPinnedLibraryTests: XCTestCase {
         }
     }
 
+    func testIntentPinSucceedsAfterDurableCommitEvenWhenLibraryLocksBeforeReturn() async throws {
+        let barrier = ArmedLocalAsyncBarrier()
+        let fixture = LocalLibraryFixture(beforeReturningMutation: { await barrier.suspendIfArmed() })
+        defer { fixture.remove() }
+        let value = payload("intent durable secret", title: "Intent", category: nil)
+        await barrier.arm()
+        let pin = Task { try await fixture.library.pinForIntent(value) }
+        await barrier.waitUntilEntered()
+
+        let committed = try await fixture.store.load()
+        XCTAssertEqual(committed.primaryRevisions.map(\.payload), [value])
+        XCTAssertEqual(committed.pendingJournal.pending.count, 1)
+        await fixture.library.protectedDataWillBecomeUnavailable()
+        await barrier.release()
+
+        let result = try await pin.value
+        XCTAssertEqual(result.libraryGeneration, 0)
+    }
+
     func testEnsurePinnedUsesFixedIDAndRetryCreatesOneRevisionAndJournalEntry() async throws {
         let fixture = LocalLibraryFixture()
         defer { fixture.remove() }

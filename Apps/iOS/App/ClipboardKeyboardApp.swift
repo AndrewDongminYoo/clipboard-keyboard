@@ -1,9 +1,16 @@
+import AppIntents
 import SwiftUI
 
 @main
 struct ClipboardKeyboardApp: App {
-    @StateObject private var model = PhoneAppModel()
+    @StateObject private var model: PhoneAppModel
     @Environment(\.scenePhase) private var scenePhase
+
+    init() {
+        let runtime = IntentDependencies()
+        AppDependencyManager.shared.add(dependency: runtime)
+        _model = StateObject(wrappedValue: PhoneAppModel(runtime: runtime))
+    }
 
     var body: some Scene {
         WindowGroup {

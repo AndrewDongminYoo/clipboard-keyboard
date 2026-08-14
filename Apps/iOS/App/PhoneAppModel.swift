@@ -1,6 +1,5 @@
 import ClipboardCore
 import Combine
-import CryptoKit
 import Foundation
 import UIKit
 
@@ -131,6 +130,18 @@ final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
         return true
     }
 
+    @discardableResult
+    func failInstalledUnlock(_ unlock: PhoneUnlockContext) -> Bool {
+        guard unlock.epoch == lifecycleEpoch,
+              installedLease === unlock.lease
+        else {
+            unlock.lease.revoke()
+            return false
+        }
+        lock()
+        return true
+    }
+
     func lock() {
         armSnapshotRevocationFence()
         pendingLease?.revoke()
@@ -186,6 +197,22 @@ final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
             try validate(epoch, lease: lease)
             snapshotGeneration = result.libraryGeneration
             try? await refreshKeyboardSnapshotLocked(session)
+            return result
+        }
+    }
+
+    func pinForIntent(_ payload: PinPayload) async throws -> IntentPinCommit {
+        let session = try currentBackend()
+        return try await withSerializedSnapshotOperation(session) { session in
+            let (backend, epoch, lease) = session
+            guard let intentBackend = backend as? any IntentPinCommittingLibrary else {
+                throw LocalPinnedLibraryError.itemNotFound
+            }
+            let result = try await intentBackend.pinForIntent(payload)
+            if isInstalledCurrent(epoch, lease: lease) {
+                snapshotGeneration = result.libraryGeneration
+                try? await refreshKeyboardSnapshotLocked(session)
+            }
             return result
         }
     }
@@ -444,6 +471,14 @@ final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
             throw EncryptedPhonePinnedStoreError.protectedDataUnavailable
         }
     }
+
+    private func isInstalledCurrent(_ epoch: UInt64, lease: ProtectedDataLease) -> Bool {
+        epoch == lifecycleEpoch &&
+            backend != nil &&
+            installedLease === lease &&
+            lease.isActive &&
+            snapshotSafetyReady
+    }
 }
 
 @MainActor
@@ -455,15 +490,14 @@ final class PhoneAppModel: ObservableObject {
     @Published private(set) var shareCommitInProgress = false
     @Published private(set) var shareErrorMessage: String?
 
-    private let libraryGate: PhonePinnedLibraryGate
+    private let runtime: IntentDependencies
     private let shareInboxConsumer: ShareInboxConsumer?
-    private var localLibrary: LocalPinnedLibrary?
     private var observers: Set<AnyCancellable> = []
 
-    init() {
+    init(runtime: IntentDependencies = IntentDependencies()) {
         let protectedDataAvailable = UIApplication.shared.isProtectedDataAvailable
-        let gate = PhonePinnedLibraryGate(snapshotPublisher: KeyboardSnapshotPublisher())
-        libraryGate = gate
+        self.runtime = runtime
+        let gate = runtime.gate
         libraryViewModel = LibraryViewModel(
             library: gate,
             representations: { text in try await gate.representations(for: text) }
@@ -497,7 +531,7 @@ final class PhoneAppModel: ObservableObject {
     }
 
     func sceneDidBecomeActive() async {
-        guard UIApplication.shared.isProtectedDataAvailable, localLibrary != nil else { return }
+        guard UIApplication.shared.isProtectedDataAvailable, runtime.isReady else { return }
         shareInboxConsumer?.protectedDataDidBecomeAvailable()
         await refreshShareInbox()
     }
@@ -552,52 +586,26 @@ final class PhoneAppModel: ObservableObject {
     }
 
     private func protectedDataWillBecomeUnavailable() {
-        libraryGate.lock()
+        runtime.lock()
         shareInboxConsumer?.protectedDataWillBecomeUnavailable()
         pendingShare = nil
         shareErrorMessage = nil
         libraryViewModel.protectedDataWillBecomeUnavailable()
         extractViewModel.protectedDataWillBecomeUnavailable()
         importExportViewModel.protectedDataWillBecomeUnavailable()
-        let previousLibrary = localLibrary
-        localLibrary = nil
-        guard let previousLibrary else { return }
-        Task { await previousLibrary.protectedDataWillBecomeUnavailable() }
     }
 
     private func protectedDataDidBecomeAvailable() async {
-        let unlock = libraryGate.beginUnlock()
+        let lifecycle = runtime.protectedDataDidBecomeAvailable()
         do {
-            let backend = try makeBackend(lease: unlock.lease)
-            try await backend.library.reopenProtectedData()
-            let state = try await backend.store.load()
-            guard libraryGate.install(
-                backend.library,
-                textTransformer: backend.textTransformer,
-                for: unlock,
-                generation: state.libraryGeneration,
-                snapshotSafetyInitialized: false
-            ) else {
-                await backend.library.protectedDataWillBecomeUnavailable()
-                return
-            }
-            do {
-                try await libraryGate.initializeKeyboardSnapshotSafety()
-            } catch {
-                libraryGate.lock()
-                localLibrary = nil
-                await backend.library.protectedDataWillBecomeUnavailable()
-                libraryViewModel.protectedDataWillBecomeUnavailable()
-                return
-            }
-            localLibrary = backend.library
+            try await runtime.ensureReady()
             await libraryViewModel.load()
             if UIApplication.shared.applicationState == .active {
                 shareInboxConsumer?.protectedDataDidBecomeAvailable()
                 await refreshShareInbox()
             }
         } catch {
-            if libraryGate.failUnlock(unlock) {
+            if runtime.isCurrentLifecycle(lifecycle) {
                 libraryViewModel.protectedDataWillBecomeUnavailable()
             }
         }
@@ -614,34 +622,4 @@ final class PhoneAppModel: ObservableObject {
             pendingShare = nil
         }
     }
-
-    private func makeBackend(lease: ProtectedDataLease) throws -> PhoneLibraryBackend {
-        let key = try PhoneKeychainMasterKeyStore().loadOrCreateKey()
-        let directory = try FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        let store = EncryptedPhonePinnedStore(
-            fileURL: directory.appendingPathComponent("phone-pinned-replica.encrypted"),
-            key: key,
-            lease: lease
-        )
-        let library = LocalPinnedLibrary(
-            store: store,
-            lease: lease,
-            deviceID: UIDevice.current.identifierForVendor?.uuidString ?? "iphone"
-        )
-        let textTransformer = TextTransformer { data in
-            Data(HMAC<SHA256>.authenticationCode(for: data, using: key))
-        }
-        return PhoneLibraryBackend(library: library, store: store, textTransformer: textTransformer)
-    }
-}
-
-private struct PhoneLibraryBackend: Sendable {
-    let library: LocalPinnedLibrary
-    let store: EncryptedPhonePinnedStore
-    let textTransformer: TextTransformer
 }
