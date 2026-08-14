@@ -63,7 +63,7 @@ targets:
     type: application
     platform: iOS
     sources:
-      - Apps/iOS/App
+      - Apps/iOS
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.andrewdongminyoo.clipboardkeyboard.ios
