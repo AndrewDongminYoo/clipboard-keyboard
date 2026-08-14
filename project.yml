@@ -66,6 +66,7 @@ targets:
       - Apps/iOS
     settings:
       base:
+        CODE_SIGN_ENTITLEMENTS: Apps/iOS/ClipboardKeyboardiOS.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: kr.donminzzi.clipboardkeyboard.ios
     dependencies:
       - target: ClipboardKeyboardKeyboard
@@ -86,6 +87,7 @@ targets:
       - Extensions/Keyboard
     settings:
       base:
+        CODE_SIGN_ENTITLEMENTS: Extensions/Keyboard/ClipboardKeyboardKeyboard.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: kr.donminzzi.clipboardkeyboard.ios.keyboard
     info:
       path: ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardKeyboard-Info.plist
@@ -144,6 +146,7 @@ targets:
     platform: iOS
     sources:
       - Tests/Keyboard
+      - Extensions/Keyboard
     dependencies:
       - target: ClipboardKeyboardKeyboard
 
