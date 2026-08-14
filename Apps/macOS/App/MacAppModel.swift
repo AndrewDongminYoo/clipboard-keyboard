@@ -110,7 +110,7 @@ final class MacAppModel: ObservableObject {
                 deviceID: Host.current().localizedName ?? "mac"
             )
             let dataSource = LivePaletteDataSource(historyStore: historyStore, pinnedLibrary: pinnedLibrary)
-            let viewModel = try PaletteViewModel(
+            let viewModel = PaletteViewModel(
                 dataSource: dataSource,
                 pasteboardWriter: LivePalettePasteboardWriter(),
                 exporter: MacPaletteExporter(),
@@ -465,14 +465,19 @@ final class MacPaletteSharer: PaletteSharing {
     private let picker: any MacSharePickerPresenting
     private var temporaryURL: URL?
     private var sessionID: UUID?
+    private var startupCleanupPending = false
 
     init(
         controller: MacImportExportController = MacImportExportController(),
         picker: any MacSharePickerPresenting = AppKitMacSharePicker()
-    ) throws {
+    ) {
         self.controller = controller
         self.picker = picker
-        try controller.scavengeTemporaryExports()
+        do {
+            try controller.scavengeTemporaryExports()
+        } catch {
+            startupCleanupPending = true
+        }
     }
 
     func share(
@@ -480,17 +485,20 @@ final class MacPaletteSharer: PaletteSharing {
         as format: MacClipDocumentFormat,
         completion: @escaping @MainActor (Result<PaletteShareOutcome, any Error>) -> Void
     ) throws {
+        guard sessionID == nil else { throw MacPaletteShareError.failed }
         guard let representation = item.representations.first(where: { $0.kind == format.representationKind })
         else { throw MacClipDocumentError.malformedDocument }
-        try cleanup()
+        try retryStartupCleanupIfNeeded()
+        try cleanupOwnedTemporaryFile()
         let url = try controller.prepareTemporaryExport(.init(format: format, bytes: representation.originalBytes))
         let sessionID = UUID()
         temporaryURL = url
         self.sessionID = sessionID
         picker.present(url: url) { [weak self] outcome in
             guard let self, self.sessionID == sessionID else { return }
+            self.sessionID = nil
             do {
-                try self.cleanup()
+                try self.cleanupOwnedTemporaryFile()
                 switch outcome {
                 case .shared:
                     completion(.success(.shared))
@@ -505,13 +513,20 @@ final class MacPaletteSharer: PaletteSharing {
         }
     }
 
-    private func cleanup() throws {
-        defer {
-            temporaryURL = nil
-            sessionID = nil
+    private func retryStartupCleanupIfNeeded() throws {
+        guard startupCleanupPending else { return }
+        do {
+            try controller.scavengeTemporaryExports()
+            startupCleanupPending = false
+        } catch {
+            throw MacPaletteShareError.failed
         }
+    }
+
+    private func cleanupOwnedTemporaryFile() throws {
         if let temporaryURL {
             try controller.cancelTemporaryExport(temporaryURL)
+            self.temporaryURL = nil
         }
     }
 

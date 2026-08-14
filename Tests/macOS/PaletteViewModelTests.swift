@@ -124,7 +124,7 @@ final class PaletteViewModelTests: XCTestCase {
         try Data("stale-share".utf8).write(to: stale)
         try Data("keep".utf8).write(to: arbitrary)
         let picker = MacSharePickerStub()
-        var sharer: MacPaletteSharer? = try MacPaletteSharer(
+        var sharer: MacPaletteSharer? = MacPaletteSharer(
             controller: MacImportExportController(temporaryDirectory: root),
             picker: picker
         )
@@ -149,13 +149,13 @@ final class PaletteViewModelTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: teardownURL.path))
     }
 
-    func testProductionShareCleanupFailureSurfacesContentFreeViewModelError() async throws {
+    func testProductionShareCleanupFailureSurfacesContentFreeViewModelError() async {
         enum CleanupFailure: Error { case failed }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let picker = MacSharePickerStub()
         let controller = MacImportExportController(temporaryDirectory: root, removeTemporaryItem: { _ in throw CleanupFailure.failed })
-        let sharer = try MacPaletteSharer(controller: controller, picker: picker)
+        let sharer = MacPaletteSharer(controller: controller, picker: picker)
         let model = PaletteViewModel(
             dataSource: PaletteDataSourceStub(recent: [makeEnvelope(text: "cleanup", capturedAt: 1)], pinned: []),
             pasteboardWriter: PalettePasteboardWriterSpy(),
@@ -167,6 +167,105 @@ final class PaletteViewModelTests: XCTestCase {
         picker.complete(.cancelled)
 
         XCTAssertEqual(model.statusMessage, "Share Failed")
+    }
+
+    func testProductionShareStartupCleanupFailureDisablesOnlyShareUntilRetrySucceeds() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let stale = root.appendingPathComponent("\(UUID().uuidString).txt")
+        let unrelated = root.appendingPathComponent("keep.txt")
+        try Data("stale".utf8).write(to: stale)
+        try Data("keep".utf8).write(to: unrelated)
+        let remover = TemporaryRemovalStub(failuresRemaining: 2)
+        let picker = MacSharePickerStub()
+        let sharer = MacPaletteSharer(
+            controller: MacImportExportController(temporaryDirectory: root, removeTemporaryItem: remover.remove),
+            picker: picker
+        )
+        let recent = makeEnvelope(text: "healthy-history", capturedAt: 1)
+        let pinned = makeRevision(text: "healthy-pinned", modifiedAt: 1)
+        let model = PaletteViewModel(
+            dataSource: PaletteDataSourceStub(recent: [recent], pinned: [pinned]),
+            pasteboardWriter: PalettePasteboardWriterSpy(),
+            sharer: sharer
+        )
+
+        await model.search(scope: .recent)
+        XCTAssertEqual(model.items.map(\.id), [recent.id])
+        await model.shareSelected(as: .txt)
+        XCTAssertEqual(model.statusMessage, "Share Failed")
+        XCTAssertTrue(picker.presentedURLs.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stale.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unrelated.path))
+        await model.search(scope: .pinned)
+        XCTAssertEqual(model.items.map(\.id), [pinned.itemID])
+
+        remover.failuresRemaining = 0
+        await model.shareSelected(as: .txt)
+        XCTAssertEqual(picker.presentedURLs.count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stale.path))
+        picker.completeLatest(.shared)
+        XCTAssertNil(model.statusMessage)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unrelated.path))
+    }
+
+    func testProductionShareRejectsOverlapAndIgnoresRetainedStaleCallback() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let picker = MacSharePickerStub()
+        let sharer = MacPaletteSharer(controller: MacImportExportController(temporaryDirectory: root), picker: picker)
+        var firstResult: Result<PaletteShareOutcome, any Error>?
+        var secondResult: Result<PaletteShareOutcome, any Error>?
+
+        try sharer.share(makePaletteItem(text: "first"), as: .txt) { firstResult = $0 }
+        let firstURL = try XCTUnwrap(picker.presentedURLs.first)
+        XCTAssertThrowsError(try sharer.share(makePaletteItem(text: "rejected"), as: .txt) { secondResult = $0 })
+        XCTAssertEqual(picker.presentedURLs, [firstURL])
+        XCTAssertNil(firstResult)
+        XCTAssertNil(secondResult)
+
+        picker.complete(at: 0, with: .shared)
+        XCTAssertNoThrow(try firstResult?.get())
+        try sharer.share(makePaletteItem(text: "second"), as: .txt) { secondResult = $0 }
+        let secondURL = try XCTUnwrap(picker.presentedURLs.last)
+        XCTAssertNotEqual(secondURL, firstURL)
+
+        picker.complete(at: 0, with: .failed)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: secondURL.path))
+        XCTAssertNil(secondResult)
+        picker.complete(at: 1, with: .shared)
+        XCTAssertNoThrow(try secondResult?.get())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: secondURL.path))
+    }
+
+    func testProductionShareRuntimeCleanupFailureRetainsURLForNextAttempt() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let unrelated = root.appendingPathComponent("keep.txt")
+        try Data("keep".utf8).write(to: unrelated)
+        let remover = TemporaryRemovalStub()
+        let picker = MacSharePickerStub()
+        let sharer = MacPaletteSharer(
+            controller: MacImportExportController(temporaryDirectory: root, removeTemporaryItem: remover.remove),
+            picker: picker
+        )
+        var firstResult: Result<PaletteShareOutcome, any Error>?
+
+        try sharer.share(makePaletteItem(text: "first"), as: .txt) { firstResult = $0 }
+        let firstURL = try XCTUnwrap(picker.lastURL)
+        remover.failuresRemaining = 1
+        picker.completeLatest(.cancelled)
+        XCTAssertThrowsError(try firstResult?.get())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: firstURL.path))
+
+        try sharer.share(makePaletteItem(text: "second"), as: .txt) { _ in }
+        XCTAssertEqual(remover.attemptedURLs.filter { $0 == firstURL }.count, 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: firstURL.path))
+        XCTAssertEqual(picker.presentedURLs.count, 2)
+        XCTAssertTrue(try FileManager.default.fileExists(atPath: XCTUnwrap(picker.lastURL).path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unrelated.path))
     }
 
     private func makeEnvelope(text: String, capturedAt: TimeInterval) -> ClipEnvelope {
@@ -220,16 +319,62 @@ final class PaletteViewModelTests: XCTestCase {
 @MainActor
 private final class MacSharePickerStub: MacSharePickerPresenting {
     private(set) var lastURL: URL?
-    private var completion: ((MacSharePickerOutcome) -> Void)?
+    private(set) var presentedURLs: [URL] = []
+    private var completions: [(MacSharePickerOutcome) -> Void] = []
     func present(url: URL, completion: @escaping @MainActor (MacSharePickerOutcome) -> Void) {
         lastURL = url
-        self.completion = completion
+        presentedURLs.append(url)
+        completions.append(completion)
     }
 
     func complete(_ outcome: MacSharePickerOutcome) {
-        let completion = completion
-        self.completion = nil
-        completion?(outcome)
+        completeLatest(outcome)
+    }
+
+    func completeLatest(_ outcome: MacSharePickerOutcome) {
+        completions.last?(outcome)
+    }
+
+    func complete(at index: Int, with outcome: MacSharePickerOutcome) {
+        completions[index](outcome)
+    }
+}
+
+private enum TemporaryRemovalFailure: Error {
+    case failed
+}
+
+private final class TemporaryRemovalStub: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedFailuresRemaining: Int
+    private var storedAttemptedURLs: [URL] = []
+
+    init(failuresRemaining: Int = 0) {
+        storedFailuresRemaining = failuresRemaining
+    }
+
+    var failuresRemaining: Int {
+        get { lock.withLock { storedFailuresRemaining } }
+        set { lock.withLock { storedFailuresRemaining = newValue } }
+    }
+
+    var attemptedURLs: [URL] {
+        lock.withLock { storedAttemptedURLs }
+    }
+
+    func remove(_ url: URL) throws {
+        let shouldFail = lock.withLock {
+            storedAttemptedURLs.append(url)
+            if storedFailuresRemaining > 0 {
+                storedFailuresRemaining -= 1
+                return true
+            }
+            return false
+        }
+        if shouldFail {
+            throw TemporaryRemovalFailure.failed
+        }
+        try FileManager.default.removeItem(at: url)
     }
 }
 
