@@ -32,6 +32,7 @@ private extension NSAlert {
 @MainActor
 final class PrivateCopyFallbackState: ObservableObject {
     @Published private(set) var message: String?
+    let availabilityPrompt = "Private Copy unavailable? Pause Capture for 60 Seconds"
     let actionTitle = "Pause Capture for 60 Seconds"
     @Published private(set) var didReportSuccess = false
 

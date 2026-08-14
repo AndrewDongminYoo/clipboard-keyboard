@@ -46,21 +46,56 @@ protocol PaletteExporting: AnyObject {
 
 @MainActor
 protocol PaletteImporting: AnyObject {
-    func importAndPin() async throws
+    func importAndPin() async throws -> PaletteImportOutcome
+}
+
+enum PaletteImportOutcome: Equatable, Sendable {
+    case imported
+    case cancelled
+}
+
+enum PaletteShareOutcome: Equatable, Sendable {
+    case shared
+    case cancelled
 }
 
 @MainActor
 protocol PaletteSharing: AnyObject {
-    func share(_ item: PaletteItem, as format: MacClipDocumentFormat) async throws
+    func share(
+        _ item: PaletteItem,
+        as format: MacClipDocumentFormat,
+        completion: @escaping @MainActor (Result<PaletteShareOutcome, any Error>) -> Void
+    ) throws
+}
+
+private enum UnavailablePaletteActionError: Error {
+    case unavailable
 }
 
 @MainActor
-final class NoopPaletteExporter: PaletteExporting {
-    func export(_: PaletteItem, as _: MacClipDocumentFormat) async throws {}
+final class UnavailablePaletteExporter: PaletteExporting {
+    func export(_: PaletteItem, as _: MacClipDocumentFormat) async throws {
+        throw UnavailablePaletteActionError.unavailable
+    }
 }
 
-@MainActor final class NoopPaletteImporter: PaletteImporting { func importAndPin() async throws {} }
-@MainActor final class NoopPaletteSharer: PaletteSharing { func share(_: PaletteItem, as _: MacClipDocumentFormat) async throws {} }
+@MainActor
+final class UnavailablePaletteImporter: PaletteImporting {
+    func importAndPin() async throws -> PaletteImportOutcome {
+        throw UnavailablePaletteActionError.unavailable
+    }
+}
+
+@MainActor
+final class UnavailablePaletteSharer: PaletteSharing {
+    func share(
+        _: PaletteItem,
+        as _: MacClipDocumentFormat,
+        completion _: @escaping @MainActor (Result<PaletteShareOutcome, any Error>) -> Void
+    ) throws {
+        throw UnavailablePaletteActionError.unavailable
+    }
+}
 
 @MainActor
 final class PaletteViewModel: ObservableObject {
@@ -80,9 +115,9 @@ final class PaletteViewModel: ObservableObject {
     init(
         dataSource: any PaletteDataSource,
         pasteboardWriter: any PalettePasteboardWriting,
-        exporter: any PaletteExporting = NoopPaletteExporter(),
-        importer: any PaletteImporting = NoopPaletteImporter(),
-        sharer: any PaletteSharing = NoopPaletteSharer()
+        exporter: any PaletteExporting = UnavailablePaletteExporter(),
+        importer: any PaletteImporting = UnavailablePaletteImporter(),
+        sharer: any PaletteSharing = UnavailablePaletteSharer()
     ) {
         self.dataSource = dataSource
         self.pasteboardWriter = pasteboardWriter
@@ -170,9 +205,13 @@ final class PaletteViewModel: ObservableObject {
 
     func importAndPin() async {
         do {
-            try await importer.importAndPin()
-            statusMessage = "Sync Pending"
-            await search(scope: .pinned)
+            switch try await importer.importAndPin() {
+            case .imported:
+                await search(scope: .pinned)
+                statusMessage = "Sync Pending"
+            case .cancelled:
+                break
+            }
         } catch {
             statusMessage = "Import Failed"
         }
@@ -181,8 +220,16 @@ final class PaletteViewModel: ObservableObject {
     func shareSelected(as format: MacClipDocumentFormat) async {
         guard let item = selectedItem else { return }
         do {
-            try await sharer.share(item, as: format)
-            statusMessage = nil
+            try sharer.share(item, as: format) { [weak self] result in
+                switch result {
+                case .success(.shared):
+                    self?.statusMessage = nil
+                case .success(.cancelled):
+                    break
+                case .failure:
+                    self?.statusMessage = "Share Failed"
+                }
+            }
         } catch {
             statusMessage = "Share Failed"
         }

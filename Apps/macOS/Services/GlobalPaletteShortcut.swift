@@ -35,6 +35,7 @@ protocol GlobalShortcutRegistering: AnyObject {
 final class GlobalPaletteShortcut: ObservableObject {
     @Published private(set) var current: GlobalShortcutDefinition = .defaultPalette
     @Published private(set) var conflictMessage: String?
+    @Published private(set) var isRegistered = false
 
     private let registrar: any GlobalShortcutRegistering
     private var handler: @MainActor @Sendable () -> Void = {}
@@ -62,6 +63,7 @@ final class GlobalPaletteShortcut: ObservableObject {
         case .success:
             current = definition
             conflictMessage = nil
+            isRegistered = true
             return true
         case .conflict:
             conflictMessage = "Shortcut is already in use"

@@ -2,6 +2,7 @@
 import ClipboardCore
 import CryptoKit
 import Foundation
+import UniformTypeIdentifiers
 
 @MainActor
 protocol MacCaptureWatching: AnyObject {
@@ -69,6 +70,7 @@ final class MacAppModel: ObservableObject {
             guard let self else { return }
             self.configureCapture(enabled: self.settings.captureConsentGranted)
         }
+        settings.shortcutConflict = { [weak self] in self?.privateCopyFallback.shortcutDidConflict() }
         settings.capturePauseChanged = { [weak self] duration in
             if let duration {
                 self?.captureCoordinator?.pauseCapture(for: duration)
@@ -108,7 +110,7 @@ final class MacAppModel: ObservableObject {
                 deviceID: Host.current().localizedName ?? "mac"
             )
             let dataSource = LivePaletteDataSource(historyStore: historyStore, pinnedLibrary: pinnedLibrary)
-            let viewModel = PaletteViewModel(
+            let viewModel = try PaletteViewModel(
                 dataSource: dataSource,
                 pasteboardWriter: LivePalettePasteboardWriter(),
                 exporter: MacPaletteExporter(),
@@ -146,8 +148,11 @@ final class MacAppModel: ObservableObject {
     }
 
     func start() {
-        if !shortcut.update(to: settings.paletteShortcut) {
-            privateCopyFallback.shortcutDidConflict()
+        let configuredShortcut = settings.paletteShortcut
+        if !settings.updateShortcut(configuredShortcut, using: shortcut),
+           configuredShortcut != .defaultPalette
+        {
+            _ = settings.updateShortcut(.defaultPalette, using: shortcut)
         }
         configureCapture(enabled: settings.captureConsentGranted)
     }
@@ -334,40 +339,92 @@ private final class MacPaletteExporter: PaletteExporting {
 }
 
 @MainActor
-private final class MacPaletteImporter: PaletteImporting {
-    private let library: any PinnedLibrary
-    private let controller: MacImportExportController
+protocol MacImportSelecting: AnyObject {
+    func selectURL(allowedContentTypes: [UTType]) -> URL?
+}
 
-    init(library: any PinnedLibrary, digestProvider: @escaping @Sendable (Data) throws -> Data) {
-        self.library = library
-        controller = MacImportExportController(digestProvider: digestProvider)
-    }
-
-    func importAndPin() async throws {
+@MainActor
+private final class OpenPanelMacImportSelector: MacImportSelecting {
+    func selectURL(allowedContentTypes: [UTType]) -> URL? {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = [.plainText, .rtf, .html]
-        guard panel.runModal() == .OK, let url = panel.url,
-              let format = MacClipDocumentFormat(rawValue: url.pathExtension.lowercased())
-        else { return }
-        let document = try controller.importDocument(at: url, as: format)
-        _ = try await controller.pinImportedDocument(document, title: "Imported Clipboard Item", using: library)
+        panel.allowedContentTypes = allowedContentTypes
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
     }
 }
 
 @MainActor
-private final class MacPaletteSharer: NSObject, PaletteSharing, @preconcurrency NSSharingServicePickerDelegate, NSSharingServiceDelegate {
-    private let controller = MacImportExportController()
-    private var temporaryURL: URL?
-    private var picker: NSSharingServicePicker?
+final class MacPaletteImporter: PaletteImporting {
+    private let library: any PinnedLibrary
+    private let controller: MacImportExportController
+    private let selector: any MacImportSelecting
 
-    func share(_ item: PaletteItem, as format: MacClipDocumentFormat) async throws {
-        guard let representation = item.representations.first(where: { $0.kind == format.representationKind }),
-              let view = NSApplication.shared.keyWindow?.contentView
-        else { throw MacClipDocumentError.malformedDocument }
-        cleanup()
-        let url = try controller.prepareTemporaryExport(.init(format: format, bytes: representation.originalBytes))
-        temporaryURL = url
+    init(
+        library: any PinnedLibrary,
+        digestProvider: @escaping @Sendable (Data) throws -> Data,
+        selector: any MacImportSelecting = OpenPanelMacImportSelector()
+    ) {
+        self.library = library
+        controller = MacImportExportController(digestProvider: digestProvider)
+        self.selector = selector
+    }
+
+    func importAndPin() async throws -> PaletteImportOutcome {
+        guard let url = selector.selectURL(allowedContentTypes: [
+            .plainText,
+            UTType("net.daringfireball.markdown")!,
+            .rtf,
+            .html,
+        ]),
+            let format = Self.documentFormat(forPathExtension: url.pathExtension)
+        else { return .cancelled }
+        let document = try controller.importDocument(at: url, as: format)
+        _ = try await controller.pinImportedDocument(document, title: "Imported Clipboard Item", using: library)
+        return .imported
+    }
+
+    private static func documentFormat(forPathExtension pathExtension: String) -> MacClipDocumentFormat? {
+        switch pathExtension.lowercased() {
+        case "txt", "text":
+            .txt
+        case "md", "markdown":
+            .md
+        case "rtf":
+            .rtf
+        case "html", "htm":
+            .html
+        default:
+            nil
+        }
+    }
+}
+
+@MainActor
+enum MacSharePickerOutcome: Equatable, Sendable {
+    case shared
+    case cancelled
+    case failed
+}
+
+@MainActor
+protocol MacSharePickerPresenting: AnyObject {
+    func present(url: URL, completion: @escaping @MainActor (MacSharePickerOutcome) -> Void)
+}
+
+@MainActor
+private final class AppKitMacSharePicker: NSObject, MacSharePickerPresenting,
+    @preconcurrency NSSharingServicePickerDelegate, NSSharingServiceDelegate
+{
+    private var picker: NSSharingServicePicker?
+    private var completion: (@MainActor (MacSharePickerOutcome) -> Void)?
+
+    func present(url: URL, completion: @escaping @MainActor (MacSharePickerOutcome) -> Void) {
+        guard let view = NSApplication.shared.keyWindow?.contentView else {
+            completion(.failed)
+            return
+        }
+        self.completion = completion
         let picker = NSSharingServicePicker(items: [url])
         self.picker = picker
         picker.delegate = self
@@ -376,25 +433,91 @@ private final class MacPaletteSharer: NSObject, PaletteSharing, @preconcurrency 
 
     func sharingServicePicker(_: NSSharingServicePicker, didChoose service: NSSharingService?) {
         guard let service else {
-            cleanup()
+            finish(.cancelled)
             return
         }
         service.delegate = self
     }
 
     func sharingService(_: NSSharingService, didShareItems _: [Any]) {
-        cleanup()
+        finish(.shared)
     }
 
     func sharingService(_: NSSharingService, didFailToShareItems _: [Any], error _: any Error) {
-        cleanup()
+        finish(.failed)
     }
 
-    private func cleanup() {
+    private func finish(_ outcome: MacSharePickerOutcome) {
+        let completion = completion
+        self.completion = nil
+        picker = nil
+        completion?(outcome)
+    }
+}
+
+private enum MacPaletteShareError: Error {
+    case failed
+}
+
+@MainActor
+final class MacPaletteSharer: PaletteSharing {
+    private let controller: MacImportExportController
+    private let picker: any MacSharePickerPresenting
+    private var temporaryURL: URL?
+    private var sessionID: UUID?
+
+    init(
+        controller: MacImportExportController = MacImportExportController(),
+        picker: any MacSharePickerPresenting = AppKitMacSharePicker()
+    ) throws {
+        self.controller = controller
+        self.picker = picker
+        try controller.scavengeTemporaryExports()
+    }
+
+    func share(
+        _ item: PaletteItem,
+        as format: MacClipDocumentFormat,
+        completion: @escaping @MainActor (Result<PaletteShareOutcome, any Error>) -> Void
+    ) throws {
+        guard let representation = item.representations.first(where: { $0.kind == format.representationKind })
+        else { throw MacClipDocumentError.malformedDocument }
+        try cleanup()
+        let url = try controller.prepareTemporaryExport(.init(format: format, bytes: representation.originalBytes))
+        let sessionID = UUID()
+        temporaryURL = url
+        self.sessionID = sessionID
+        picker.present(url: url) { [weak self] outcome in
+            guard let self, self.sessionID == sessionID else { return }
+            do {
+                try self.cleanup()
+                switch outcome {
+                case .shared:
+                    completion(.success(.shared))
+                case .cancelled:
+                    completion(.success(.cancelled))
+                case .failed:
+                    completion(.failure(MacPaletteShareError.failed))
+                }
+            } catch {
+                completion(.failure(MacPaletteShareError.failed))
+            }
+        }
+    }
+
+    private func cleanup() throws {
+        defer {
+            temporaryURL = nil
+            sessionID = nil
+        }
+        if let temporaryURL {
+            try controller.cancelTemporaryExport(temporaryURL)
+        }
+    }
+
+    deinit {
         if let temporaryURL {
             try? controller.cancelTemporaryExport(temporaryURL)
         }
-        temporaryURL = nil
-        picker = nil
     }
 }

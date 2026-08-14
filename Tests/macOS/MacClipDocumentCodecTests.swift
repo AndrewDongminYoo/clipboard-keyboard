@@ -2,6 +2,7 @@ import AppKit
 import ClipboardCore
 @testable import ClipboardKeyboardMac
 import CryptoKit
+import UniformTypeIdentifiers
 import XCTest
 
 final class MacClipDocumentCodecTests: XCTestCase {
@@ -87,5 +88,103 @@ final class MacClipDocumentCodecTests: XCTestCase {
         XCTAssertEqual(rtfRevision.payload.representations.first?.originalBytes, rtf)
         XCTAssertEqual(htmlRevision.payload.canonicalInsertionString, "HTML canonical")
         XCTAssertEqual(htmlRevision.payload.representations.first?.originalBytes, html)
+    }
+
+    @MainActor
+    func testProductionImporterExplicitlyOffersMarkdownAndPinsExactBytes() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let sourceURL = root.appendingPathComponent("source.md")
+        let original = Data("# production markdown".utf8)
+        try original.write(to: sourceURL)
+        let store = EncryptedMacPinnedStore(fileURL: root.appendingPathComponent("pinned.encrypted"), key: SymmetricKey(data: Data(repeating: 6, count: 32)))
+        let library = LocalMacPinnedLibrary(store: store, deviceID: "import-adapter")
+        let selector = MacImportSelectorStub(url: sourceURL)
+        let importer = MacPaletteImporter(library: library, digestProvider: { _ in Data([7]) }, selector: selector)
+
+        let outcome = try await importer.importAndPin()
+
+        XCTAssertEqual(outcome, .imported)
+        XCTAssertTrue(selector.allowedContentTypes.contains { $0.identifier == "net.daringfireball.markdown" })
+        let revisions = try await library.allItems()
+        let revision = try XCTUnwrap(revisions.first)
+        XCTAssertEqual(revision.payload.representations.first?.kind, .markdown)
+        XCTAssertEqual(revision.payload.representations.first?.originalBytes, original)
+    }
+
+    @MainActor
+    func testProductionImporterMapsCommonFileExtensionAliases() async throws {
+        let fixtures: [(extension: String, kind: RepresentationKind, bytes: Data)] = [
+            ("markdown", .markdown, Data("# markdown alias".utf8)),
+            ("text", .plainText, Data("plain text alias".utf8)),
+        ]
+
+        for fixture in fixtures {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let sourceURL = root.appendingPathComponent("source.\(fixture.extension)")
+            try fixture.bytes.write(to: sourceURL)
+            let store = EncryptedMacPinnedStore(
+                fileURL: root.appendingPathComponent("pinned.encrypted"),
+                key: SymmetricKey(data: Data(repeating: 4, count: 32))
+            )
+            let library = LocalMacPinnedLibrary(store: store, deviceID: "import-alias")
+            let importer = MacPaletteImporter(
+                library: library,
+                digestProvider: { _ in Data([8]) },
+                selector: MacImportSelectorStub(url: sourceURL)
+            )
+
+            let outcome = try await importer.importAndPin()
+
+            XCTAssertEqual(outcome, .imported, fixture.extension)
+            let revisions = try await library.allItems()
+            guard let revision = revisions.first else {
+                XCTFail("Expected a pinned alias document: \(fixture.extension)")
+                continue
+            }
+            XCTAssertEqual(revision.payload.representations.first?.kind, fixture.kind, fixture.extension)
+            XCTAssertEqual(revision.payload.representations.first?.originalBytes, fixture.bytes, fixture.extension)
+        }
+    }
+
+    @MainActor
+    func testProductionImporterCancellationAndUnsupportedExtensionDoNotPin() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = EncryptedMacPinnedStore(fileURL: root.appendingPathComponent("pinned.encrypted"), key: SymmetricKey(data: Data(repeating: 6, count: 32)))
+        let library = LocalMacPinnedLibrary(store: store, deviceID: "import-cancel")
+        let cancelledImporter = MacPaletteImporter(library: library, digestProvider: { _ in Data([7]) }, selector: MacImportSelectorStub(url: nil))
+        let unsupportedURL = root.appendingPathComponent("source.unsupported")
+        try Data("unsupported".utf8).write(to: unsupportedURL)
+        let unsupportedImporter = MacPaletteImporter(
+            library: library,
+            digestProvider: { _ in Data([7]) },
+            selector: MacImportSelectorStub(url: unsupportedURL)
+        )
+
+        let cancelledOutcome = try await cancelledImporter.importAndPin()
+        let unsupportedOutcome = try await unsupportedImporter.importAndPin()
+        XCTAssertEqual(cancelledOutcome, .cancelled)
+        XCTAssertEqual(unsupportedOutcome, .cancelled)
+        let revisions = try await library.allItems()
+        XCTAssertTrue(revisions.isEmpty)
+    }
+}
+
+@MainActor
+private final class MacImportSelectorStub: MacImportSelecting {
+    let url: URL?
+    private(set) var allowedContentTypes: [UTType] = []
+    init(url: URL?) {
+        self.url = url
+    }
+
+    func selectURL(allowedContentTypes: [UTType]) -> URL? {
+        self.allowedContentTypes = allowedContentTypes
+        return url
     }
 }

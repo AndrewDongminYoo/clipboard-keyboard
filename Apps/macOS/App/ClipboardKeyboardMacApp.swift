@@ -8,7 +8,8 @@ struct ClipboardKeyboardMacApp: App {
         Settings {
             MacSettingsView(
                 model: appDelegate.model.settings,
-                shortcut: appDelegate.model.shortcut
+                shortcut: appDelegate.model.shortcut,
+                fallback: appDelegate.model.privateCopyFallback
             )
         }
     }

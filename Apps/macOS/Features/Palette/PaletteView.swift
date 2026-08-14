@@ -23,11 +23,14 @@ struct PaletteView: View {
             if let status = model.statusMessage {
                 Text(status).font(.caption).foregroundStyle(.secondary)
             }
-            if let failure = fallback.message {
-                HStack {
-                    Text(failure).font(.caption).foregroundStyle(.red)
-                    Button(fallback.actionTitle) { settings.pauseCaptureFor60Seconds() }
+            HStack {
+                VStack(alignment: .leading) {
+                    Text(fallback.availabilityPrompt).font(.caption).foregroundStyle(.secondary)
+                    if let failure = fallback.message {
+                        Text(failure).font(.caption).foregroundStyle(.red)
+                    }
                 }
+                Button(fallback.actionTitle) { settings.pauseCaptureFor60Seconds() }
             }
             List(model.items, selection: Binding(
                 get: { model.selectedItemID },

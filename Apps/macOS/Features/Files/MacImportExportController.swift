@@ -5,15 +5,18 @@ struct MacImportExportController: Sendable {
     private let codec = MacClipDocumentCodec()
     private let temporaryDirectory: URL
     private let digestProvider: (@Sendable (Data) throws -> Data)?
+    private let removeTemporaryItem: @Sendable (URL) throws -> Void
     private let rtfProjector = MacRTFTextProjector()
     private let htmlProjector = HTMLTextProjector()
 
     init(
         temporaryDirectory: URL = FileManager.default.temporaryDirectory.appendingPathComponent("ClipboardKeyboard", isDirectory: true),
-        digestProvider: (@Sendable (Data) throws -> Data)? = nil
+        digestProvider: (@Sendable (Data) throws -> Data)? = nil,
+        removeTemporaryItem: @escaping @Sendable (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
     ) {
         self.temporaryDirectory = temporaryDirectory
         self.digestProvider = digestProvider
+        self.removeTemporaryItem = removeTemporaryItem
     }
 
     func importDocument(at url: URL, as format: MacClipDocumentFormat) throws -> MacClipDocument {
@@ -72,6 +75,26 @@ struct MacImportExportController: Sendable {
     func cancelTemporaryExport(_ url: URL) throws {
         guard url.deletingLastPathComponent().standardizedFileURL == temporaryDirectory.standardizedFileURL else { return }
         guard FileManager.default.fileExists(atPath: url.path) else { return }
-        try FileManager.default.removeItem(at: url)
+        try removeTemporaryItem(url)
+    }
+
+    func scavengeTemporaryExports(limit: Int = 100) throws {
+        guard FileManager.default.fileExists(atPath: temporaryDirectory.path) else { return }
+        let urls = try FileManager.default.contentsOfDirectory(
+            at: temporaryDirectory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
+        )
+        let supportedExtensions = Set(MacClipDocumentFormat.allCases.map(\.rawValue))
+        let ownedURLs = urls.sorted { $0.lastPathComponent < $1.lastPathComponent }.filter { url in
+            guard supportedExtensions.contains(url.pathExtension.lowercased()),
+                  UUID(uuidString: url.deletingPathExtension().lastPathComponent) != nil,
+                  (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+            else { return false }
+            return true
+        }
+        for url in ownedURLs.prefix(max(0, limit)) {
+            try cancelTemporaryExport(url)
+        }
     }
 }

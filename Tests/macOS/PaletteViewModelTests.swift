@@ -85,6 +85,90 @@ final class PaletteViewModelTests: XCTestCase {
         XCTAssertEqual(sharer.formats, [.html])
     }
 
+    func testImportCancellationLeavesScopeAndStatusUnchanged() async {
+        let importer = PaletteImporterSpy(outcome: .cancelled)
+        let model = PaletteViewModel(
+            dataSource: PaletteDataSourceStub(recent: [makeEnvelope(text: "recent", capturedAt: 1)], pinned: []),
+            pasteboardWriter: PalettePasteboardWriterSpy(),
+            importer: importer
+        )
+        await model.search(scope: .recent)
+
+        await model.importAndPin()
+
+        XCTAssertEqual(model.scope, .recent)
+        XCTAssertNil(model.statusMessage)
+    }
+
+    func testUnavailableDefaultFileActionsFailClosedWithoutFalseSuccess() async {
+        let model = PaletteViewModel(
+            dataSource: PaletteDataSourceStub(recent: [makeEnvelope(text: "locked", capturedAt: 1)], pinned: []),
+            pasteboardWriter: PalettePasteboardWriterSpy()
+        )
+        await model.search(scope: .recent)
+
+        await model.importAndPin()
+        XCTAssertEqual(model.statusMessage, "Import Failed")
+        await model.exportSelected(as: .txt)
+        XCTAssertEqual(model.statusMessage, "Export Failed")
+        await model.shareSelected(as: .txt)
+        XCTAssertEqual(model.statusMessage, "Share Failed")
+    }
+
+    func testProductionShareLifecycleCleansOwnedFilesAndScavengesOnlyExpectedStaleFiles() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let stale = root.appendingPathComponent("\(UUID().uuidString).txt")
+        let arbitrary = root.appendingPathComponent("keep.txt")
+        try Data("stale-share".utf8).write(to: stale)
+        try Data("keep".utf8).write(to: arbitrary)
+        let picker = MacSharePickerStub()
+        var sharer: MacPaletteSharer? = try MacPaletteSharer(
+            controller: MacImportExportController(temporaryDirectory: root),
+            picker: picker
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stale.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: arbitrary.path))
+
+        for outcome in [MacSharePickerOutcome.cancelled, .shared, .failed] {
+            var result: Result<PaletteShareOutcome, any Error>?
+            try sharer?.share(makePaletteItem(text: "share"), as: .txt) { result = $0 }
+            let temporaryURL = try XCTUnwrap(picker.lastURL)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: temporaryURL.path))
+            picker.complete(outcome)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: temporaryURL.path))
+            if outcome == .failed {
+                XCTAssertThrowsError(try result?.get())
+            }
+        }
+
+        try sharer?.share(makePaletteItem(text: "teardown"), as: .txt) { _ in }
+        let teardownURL = try XCTUnwrap(picker.lastURL)
+        sharer = nil
+        XCTAssertFalse(FileManager.default.fileExists(atPath: teardownURL.path))
+    }
+
+    func testProductionShareCleanupFailureSurfacesContentFreeViewModelError() async throws {
+        enum CleanupFailure: Error { case failed }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let picker = MacSharePickerStub()
+        let controller = MacImportExportController(temporaryDirectory: root, removeTemporaryItem: { _ in throw CleanupFailure.failed })
+        let sharer = try MacPaletteSharer(controller: controller, picker: picker)
+        let model = PaletteViewModel(
+            dataSource: PaletteDataSourceStub(recent: [makeEnvelope(text: "cleanup", capturedAt: 1)], pinned: []),
+            pasteboardWriter: PalettePasteboardWriterSpy(),
+            sharer: sharer
+        )
+        await model.search(scope: .recent)
+
+        await model.shareSelected(as: .txt)
+        picker.complete(.cancelled)
+
+        XCTAssertEqual(model.statusMessage, "Share Failed")
+    }
+
     private func makeEnvelope(text: String, capturedAt: TimeInterval) -> ClipEnvelope {
         let originals: [ClipRepresentation] = [
             .init(kind: .plainText, originalBytes: Data(text.utf8), keyedDigest: Data([1])),
@@ -123,19 +207,54 @@ final class PaletteViewModelTests: XCTestCase {
             )
         )
     }
+
+    private func makePaletteItem(text: String) -> PaletteItem {
+        .init(
+            id: UUID(), capturedAt: Date(), preview: text, contentKind: .plainText, sourceConfidence: .unknown,
+            representations: [.init(kind: .plainText, originalBytes: Data(text.utf8), keyedDigest: Data([1]))],
+            canonicalInsertionString: text, title: "Share", category: nil, isPinned: false
+        )
+    }
+}
+
+@MainActor
+private final class MacSharePickerStub: MacSharePickerPresenting {
+    private(set) var lastURL: URL?
+    private var completion: ((MacSharePickerOutcome) -> Void)?
+    func present(url: URL, completion: @escaping @MainActor (MacSharePickerOutcome) -> Void) {
+        lastURL = url
+        self.completion = completion
+    }
+
+    func complete(_ outcome: MacSharePickerOutcome) {
+        let completion = completion
+        self.completion = nil
+        completion?(outcome)
+    }
 }
 
 @MainActor private final class PaletteImporterSpy: PaletteImporting {
     private(set) var callCount = 0
-    func importAndPin() async throws {
+    let outcome: PaletteImportOutcome
+    init(outcome: PaletteImportOutcome = .imported) {
+        self.outcome = outcome
+    }
+
+    func importAndPin() async throws -> PaletteImportOutcome {
         callCount += 1
+        return outcome
     }
 }
 
 @MainActor private final class PaletteSharerSpy: PaletteSharing {
     private(set) var formats: [MacClipDocumentFormat] = []
-    func share(_: PaletteItem, as format: MacClipDocumentFormat) async throws {
+    func share(
+        _: PaletteItem,
+        as format: MacClipDocumentFormat,
+        completion: @escaping @MainActor (Result<PaletteShareOutcome, any Error>) -> Void
+    ) throws {
         formats.append(format)
+        completion(.success(.shared))
     }
 }
 

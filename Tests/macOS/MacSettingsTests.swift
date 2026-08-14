@@ -138,6 +138,86 @@ final class MacSettingsTests: XCTestCase {
         harness.model.pauseCaptureFor60Seconds()
         XCTAssertEqual(harness.settings.capturePauseSecondsRemaining, 60)
     }
+
+    func testDecodableInvalidPersistedSettingsFailClosed() throws {
+        let validIdentity = ApplicationIdentity(bundleIdentifier: "com.example.Valid", teamIdentifier: "TEAM", signingIdentifier: "valid")
+        let invalidCases: [(String, MacPersistedSettings)] = [
+            ("retention", .init(captureConsentGranted: true, syncEnabled: true, retention: .init(maxAgeHours: 25, maxItemCount: 201, historyEnabled: true))),
+            ("shortcut-key", .init(captureConsentGranted: true, paletteShortcut: .init(keyCode: 128, modifiers: [.command]))),
+            ("shortcut-modifiers", .init(captureConsentGranted: true, paletteShortcut: .init(keyCode: 8, modifiers: .init(rawValue: UInt32.max)))),
+            ("ignored-identity", .init(captureConsentGranted: true, ignoredApplications: [.init(identity: .init(bundleIdentifier: "", teamIdentifier: validIdentity.teamIdentifier, signingIdentifier: validIdentity.signingIdentifier), displayName: "Invalid")])),
+        ]
+
+        for (name, persisted) in invalidCases {
+            let suite = "MacSettingsInvalid.\(name).\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let store = UserDefaultsMacSettingsStore(defaults: defaults, key: "settings")
+            try store.save(persisted)
+
+            let settings = MacSettingsModel(store: store)
+            XCTAssertFalse(settings.captureConsentGranted, name)
+            XCTAssertFalse(settings.syncEnabled, name)
+            XCTAssertEqual(settings.retention, .init(maxAgeHours: 0, maxItemCount: 0, historyEnabled: false), name)
+            XCTAssertEqual(settings.paletteShortcut, .defaultPalette, name)
+            XCTAssertTrue(settings.ignoredApplications.isEmpty, name)
+            XCTAssertTrue(settings.protectedStorageLocked, name)
+        }
+    }
+
+    func testSettingsShortcutConflictFlowsToFallbackWithoutReplacingPersistedShortcut() throws {
+        let harness = try MacAppHarness(
+            retention: .init(maxAgeHours: 24, maxItemCount: 10, historyEnabled: true),
+            registrarResults: [.success, .conflict]
+        )
+        harness.model.start()
+        let requested = GlobalShortcutDefinition(keyCode: 8, modifiers: [.command, .shift])
+
+        XCTAssertFalse(harness.settings.updateShortcut(requested, using: harness.shortcut))
+        XCTAssertEqual(harness.settings.paletteShortcut, .defaultPalette)
+        XCTAssertEqual(harness.shortcut.current, .defaultPalette)
+        XCTAssertEqual(harness.model.privateCopyFallback.message, "Private Copy shortcut conflict")
+        harness.model.pauseCaptureFor60Seconds()
+        XCTAssertEqual(harness.settings.capturePauseSecondsRemaining, 60)
+    }
+
+    func testStartupCustomShortcutConflictFallsBackToDefaultWhenAvailable() throws {
+        let custom = GlobalShortcutDefinition(keyCode: 8, modifiers: [.command, .shift])
+        let store = MemoryMacSettingsStore(value: .init(paletteShortcut: custom))
+        let harness = try MacAppHarness(settings: MacSettingsModel(store: store), registrarResults: [.conflict, .success])
+
+        harness.model.start()
+
+        XCTAssertEqual(harness.registrar.registrations, [custom, .defaultPalette])
+        XCTAssertTrue(harness.shortcut.isRegistered)
+        XCTAssertEqual(harness.shortcut.current, .defaultPalette)
+        XCTAssertEqual(harness.settings.paletteShortcut, .defaultPalette)
+        XCTAssertEqual(harness.model.privateCopyFallback.message, "Private Copy shortcut conflict")
+    }
+
+    func testStartupReportsBothCustomAndDefaultShortcutConflictsWithoutFalseRegistration() throws {
+        let custom = GlobalShortcutDefinition(keyCode: 8, modifiers: [.command, .shift])
+        let harness = try MacAppHarness(
+            settings: MacSettingsModel(store: MemoryMacSettingsStore(value: .init(paletteShortcut: custom))),
+            registrarResults: [.conflict, .conflict]
+        )
+
+        harness.model.start()
+
+        XCTAssertEqual(harness.registrar.registrations, [custom, .defaultPalette])
+        XCTAssertFalse(harness.shortcut.isRegistered)
+        XCTAssertEqual(harness.settings.paletteShortcut, custom)
+        XCTAssertEqual(harness.model.privateCopyFallback.message, "Private Copy shortcut conflict")
+    }
+
+    func testPrivateCopyUnavailableFallbackIsAlwaysReachableFromComposition() throws {
+        let harness = try MacAppHarness(retention: .init(maxAgeHours: 24, maxItemCount: 10, historyEnabled: true))
+        XCTAssertEqual(harness.model.privateCopyFallback.availabilityPrompt, "Private Copy unavailable? Pause Capture for 60 Seconds")
+        XCTAssertEqual(harness.model.privateCopyFallback.actionTitle, "Pause Capture for 60 Seconds")
+        harness.model.pauseCaptureFor60Seconds()
+        XCTAssertEqual(harness.settings.capturePauseSecondsRemaining, 60)
+        XCTAssertFalse(harness.model.privateCopyFallback.didReportSuccess)
+    }
 }
 
 @MainActor
@@ -146,14 +226,29 @@ private final class MacAppHarness {
     let watcher = CaptureWatcherStub()
     let pasteboard = CapturePasteboardStub()
     let store: EncryptedMacClipStore
+    let registrar: ShortcutRegistrarStub
+    let shortcut: GlobalPaletteShortcut
     private let root: URL
     private(set) var model: MacAppModel!
 
-    init(retention: MacRetentionSettings, identity: ApplicationIdentity? = nil) throws {
-        root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "MacAppHarness.\(UUID().uuidString)"))
-        settings = MacSettingsModel(store: UserDefaultsMacSettingsStore(defaults: defaults, key: "settings"))
+    convenience init(
+        retention: MacRetentionSettings,
+        identity: ApplicationIdentity? = nil,
+        registrarResults: [GlobalShortcutRegistrationResult] = [.success]
+    ) throws {
+        let settings = MacSettingsModel(store: MemoryMacSettingsStore())
         try settings.updateRetention(maxAgeHours: retention.maxAgeHours, maxItemCount: retention.maxItemCount, historyEnabled: retention.historyEnabled)
+        try self.init(settings: settings, identity: identity, registrarResults: registrarResults)
+    }
+
+    init(
+        settings: MacSettingsModel,
+        identity: ApplicationIdentity? = nil,
+        registrarResults: [GlobalShortcutRegistrationResult]
+    ) throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        self.settings = settings
+        let retention = settings.retention
         store = EncryptedMacClipStore(
             rootURL: root,
             cipher: AESGCMClipCipher(key: SymmetricKey(data: Data(repeating: 2, count: 32))),
@@ -166,7 +261,8 @@ private final class MacAppHarness {
         let source = CaptureSourceStub(identity: identity ?? .init(
             bundleIdentifier: "com.example.Source", teamIdentifier: "TEAM", signingIdentifier: "source"
         ))
-        let shortcut = GlobalPaletteShortcut(registrar: ShortcutRegistrarStub(results: [.success]))
+        registrar = ShortcutRegistrarStub(results: registrarResults)
+        shortcut = GlobalPaletteShortcut(registrar: registrar)
         model = MacAppModel.makeForTesting(
             settings: settings,
             shortcut: shortcut,
@@ -283,6 +379,10 @@ private final class SettingsTickerStub: MacSettingsTickScheduling {
 
 private final class MemoryMacSettingsStore: @unchecked Sendable, MacSettingsPersisting {
     private var value: MacPersistedSettings?
+    init(value: MacPersistedSettings? = nil) {
+        self.value = value
+    }
+
     func load() throws -> MacPersistedSettings? {
         value
     }

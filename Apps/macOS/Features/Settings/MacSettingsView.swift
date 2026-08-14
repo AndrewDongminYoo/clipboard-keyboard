@@ -27,6 +27,23 @@ struct MacPersistedSettings: Codable, Equatable, Sendable {
     var retention = MacRetentionSettings(maxAgeHours: 24, maxItemCount: 200, historyEnabled: true)
     var ignoredApplications: [IgnoredApplicationDisplay] = []
     var paletteShortcut = GlobalShortcutDefinition.defaultPalette
+
+    var isSemanticallyValid: Bool {
+        let retentionIsValid = if retention.historyEnabled {
+            (1 ... 24).contains(retention.maxAgeHours) && (1 ... 200).contains(retention.maxItemCount)
+        } else {
+            retention.maxAgeHours == 0 && retention.maxItemCount == 0
+        }
+        let supportedModifiers: GlobalShortcutModifiers = [.command, .option, .shift, .control]
+        let shortcutIsValid = paletteShortcut.keyCode <= 127
+            && paletteShortcut.modifiers.rawValue & ~supportedModifiers.rawValue == 0
+        let identitiesAreValid = ignoredApplications.allSatisfy {
+            !$0.identity.bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !$0.identity.teamIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !$0.identity.signingIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return retentionIsValid && shortcutIsValid && identitiesAreValid
+    }
 }
 
 protocol MacSettingsPersisting: Sendable {
@@ -104,6 +121,7 @@ final class MacSettingsModel: ObservableObject {
     var retentionChanged: ((MacRetentionSettings) -> Void)?
     var capturePauseChanged: ((TimeInterval?) -> Void)?
     var ignoredApplicationsChanged: (() -> Void)?
+    var shortcutConflict: (() -> Void)?
 
     init(
         store: any MacSettingsPersisting = UserDefaultsMacSettingsStore(),
@@ -115,11 +133,20 @@ final class MacSettingsModel: ObservableObject {
         self.ticker = ticker
         do {
             if let persisted = try store.load() {
-                captureConsentGranted = persisted.captureConsentGranted
-                syncEnabled = persisted.syncEnabled
-                retention = persisted.retention
-                ignoredApplications = persisted.ignoredApplications
-                paletteShortcut = persisted.paletteShortcut
+                if persisted.isSemanticallyValid {
+                    captureConsentGranted = persisted.captureConsentGranted
+                    syncEnabled = persisted.syncEnabled
+                    retention = persisted.retention
+                    ignoredApplications = persisted.ignoredApplications
+                    paletteShortcut = persisted.paletteShortcut
+                } else {
+                    captureConsentGranted = false
+                    syncEnabled = false
+                    retention = .init(maxAgeHours: 0, maxItemCount: 0, historyEnabled: false)
+                    ignoredApplications = []
+                    paletteShortcut = .defaultPalette
+                    protectedStorageLocked = true
+                }
             }
         } catch {
             protectedStorageLocked = true
@@ -186,7 +213,10 @@ final class MacSettingsModel: ObservableObject {
 
     @discardableResult
     func updateShortcut(_ definition: GlobalShortcutDefinition, using shortcut: GlobalPaletteShortcut) -> Bool {
-        guard shortcut.update(to: definition) else { return false }
+        guard shortcut.update(to: definition) else {
+            shortcutConflict?()
+            return false
+        }
         paletteShortcut = definition
         persist()
         return true
@@ -230,6 +260,7 @@ final class MacSettingsModel: ObservableObject {
 struct MacSettingsView: View {
     @ObservedObject var model: MacSettingsModel
     @ObservedObject var shortcut: GlobalPaletteShortcut
+    @ObservedObject var fallback: PrivateCopyFallbackState
 
     var body: some View {
         Form {
@@ -243,7 +274,11 @@ struct MacSettingsView: View {
                 set: { try? model.setLaunchAtLogin($0) }
             ))
             Section("Privacy") {
+                Text(fallback.availabilityPrompt).font(.caption).foregroundStyle(.secondary)
                 Button("Pause Capture for 60 Seconds") { model.pauseCaptureFor60Seconds() }
+                if let failure = fallback.message {
+                    Text(failure).foregroundStyle(.red)
+                }
                 if model.capturePauseSecondsRemaining > 0 {
                     Text("Capture Pause Countdown: \(model.capturePauseSecondsRemaining)s")
                 }
