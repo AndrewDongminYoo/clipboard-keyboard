@@ -117,6 +117,129 @@ final class PhonePinnedLibrarySnapshotTests: XCTestCase {
         await XCTAssertThrowsSnapshotError(try await gate.allItems())
     }
 
+    func testDeletePurgesDeletionRecoveryContentBeforeBackendMutation() async throws {
+        let recovery = DeletionRecoveryState()
+        let backend = SnapshotLibraryFake(items: [revision(1)], onDestructiveMutation: {
+            await MainActor.run { recovery.recordBackendMutation() }
+        })
+        let gate = installedGate(publisher: SnapshotPublisherSpy(), backend: backend)
+        try recovery.populate(for: gate)
+        gate.preDestructivePurge = { [weak recovery] in
+            guard let recovery else { throw SnapshotTestFailure.injected }
+            try recovery.purge()
+        }
+
+        _ = try await gate.delete(itemID: uuid(1))
+
+        XCTAssertTrue(recovery.wasPurgedBeforeBackendMutation)
+        XCTAssertTrue(recovery.isEmpty)
+        let deleteCount = await backend.deleteCount
+        XCTAssertEqual(deleteCount, 1)
+    }
+
+    func testAdvanceResetGenerationPurgesDeletionRecoveryContentBeforeBackendMutation() async throws {
+        let recovery = DeletionRecoveryState()
+        let backend = SnapshotLibraryFake(items: [revision(1)], onDestructiveMutation: {
+            await MainActor.run { recovery.recordBackendMutation() }
+        })
+        let gate = installedGate(publisher: SnapshotPublisherSpy(), backend: backend)
+        try recovery.populate(for: gate)
+        gate.preDestructivePurge = { [weak recovery] in
+            guard let recovery else { throw SnapshotTestFailure.injected }
+            try recovery.purge()
+        }
+
+        _ = try await gate.advanceResetGeneration()
+
+        XCTAssertTrue(recovery.wasPurgedBeforeBackendMutation)
+        XCTAssertTrue(recovery.isEmpty)
+        let resetCount = await backend.resetCount
+        XCTAssertEqual(resetCount, 1)
+    }
+
+    func testNoopOrphanRemovalFailsClosedBeforeDeleteOrReset() async throws {
+        let recovery = UnremovedDeletionRecoveryState()
+        let backend = SnapshotLibraryFake(items: [revision(1)])
+        let gate = installedGate(publisher: SnapshotPublisherSpy(), backend: backend)
+        try recovery.populate(for: gate)
+        gate.preDestructivePurge = { [weak recovery] in
+            guard let recovery else { throw SnapshotTestFailure.injected }
+            try recovery.purge()
+        }
+
+        await XCTAssertThrowsPublisherError(
+            try await gate.delete(itemID: uuid(1)),
+            expected: .publicationFailed
+        )
+        await XCTAssertThrowsPublisherError(
+            try await gate.advanceResetGeneration(),
+            expected: .publicationFailed
+        )
+
+        XCTAssertTrue(recovery.orphanStillExists)
+        let deleteCount = await backend.deleteCount
+        let resetCount = await backend.resetCount
+        XCTAssertEqual(deleteCount, 0)
+        XCTAssertEqual(resetCount, 0)
+    }
+
+    func testPurgeFailurePreventsEveryBackendDestructiveMutationWithContentFreeError() async throws {
+        let deleteBackend = SnapshotLibraryFake(items: [revision(1)])
+        let deleteGate = installedGate(publisher: SnapshotPublisherSpy(), backend: deleteBackend)
+        deleteGate.preDestructivePurge = { throw SensitivePurgeFailure("delete plaintext") }
+        await XCTAssertThrowsPublisherError(
+            try await deleteGate.delete(itemID: uuid(1)),
+            expected: .publicationFailed
+        )
+
+        let resetBackend = SnapshotLibraryFake(items: [revision(1)])
+        let resetGate = installedGate(publisher: SnapshotPublisherSpy(), backend: resetBackend)
+        resetGate.preDestructivePurge = { throw SensitivePurgeFailure("reset plaintext") }
+        await XCTAssertThrowsPublisherError(
+            try await resetGate.advanceResetGeneration(),
+            expected: .publicationFailed
+        )
+
+        let remoteBackend = SnapshotLibraryFake(items: [revision(1)])
+        let remoteGate = installedGate(publisher: SnapshotPublisherSpy(), backend: remoteBackend)
+        remoteGate.preDestructivePurge = { throw SensitivePurgeFailure("remote plaintext") }
+        let tombstone = PinnedTombstone(
+            itemID: uuid(1), tombstoneID: UUID(), libraryGeneration: 1, itemGeneration: 2,
+            modifiedAt: Date(), deviceID: "remote"
+        )
+        await XCTAssertThrowsPublisherError(
+            try await remoteGate.applyRemote(.tombstone(tombstone)),
+            expected: .publicationFailed
+        )
+
+        let deleteCount = await deleteBackend.deleteCount
+        let resetCount = await resetBackend.resetCount
+        let applyRemoteCount = await remoteBackend.applyRemoteCount
+        XCTAssertEqual(deleteCount, 0)
+        XCTAssertEqual(resetCount, 0)
+        XCTAssertEqual(applyRemoteCount, 0)
+    }
+
+    func testRemoteTombstoneAndResetPurgeBeforeApplyingBackendMutations() async throws {
+        let backend = SnapshotLibraryFake(items: [revision(1)])
+        let gate = installedGate(publisher: SnapshotPublisherSpy(), backend: backend)
+        var purgeCount = 0
+        gate.preDestructivePurge = { purgeCount += 1 }
+        let tombstone = PinnedTombstone(
+            itemID: uuid(1), tombstoneID: UUID(), libraryGeneration: 1, itemGeneration: 2,
+            modifiedAt: Date(), deviceID: "remote"
+        )
+
+        _ = try await gate.applyRemote(.tombstone(tombstone))
+        _ = try await gate.applyRemote(.reset(LibraryResetGeneration(
+            resetID: UUID(), generation: 2, modifiedAt: Date(), deviceID: "remote"
+        )))
+
+        XCTAssertEqual(purgeCount, 2)
+        let applyRemoteCount = await backend.applyRemoteCount
+        XCTAssertEqual(applyRemoteCount, 2)
+    }
+
     func testQueuedOldSessionDeleteCannotUseNewlyInstalledBackend() async throws {
         let allItemsBarrier = OneShotSnapshotBarrier()
         let publisher = SnapshotPublisherSpy()
@@ -359,6 +482,113 @@ final class PhonePinnedLibrarySnapshotTests: XCTestCase {
     }
 }
 
+@MainActor
+private final class DeletionRecoveryState {
+    private var root: URL?
+    private var model: ImportExportViewModel?
+    private var trackedURL: URL?
+    private var orphanURLs: [URL] = []
+    private(set) var wasPurgedBeforeBackendMutation = false
+
+    var isEmpty: Bool {
+        guard let model else { return false }
+        return model.importPreview == nil &&
+            model.temporaryShareURL == nil &&
+            [trackedURL].compactMap { $0 }.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) } &&
+            orphanURLs.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    deinit {
+        if let root {
+            try? FileManager.default.removeItem(at: root)
+        }
+    }
+
+    func populate(for library: any PinnedLibrary) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let model = ImportExportViewModel(library: library, representations: { _ in [] }, temporaryDirectory: root)
+        let item = PinnedRevision(
+            itemID: UUID(), revisionID: UUID(), libraryGeneration: 1, itemGeneration: 1,
+            modifiedAt: Date(), deviceID: "recovery-test", payload: PinPayload(
+                representations: [.init(kind: .plainText, originalBytes: Data("shared".utf8), keyedDigest: Data([1]))],
+                canonicalInsertionString: "shared", title: "Shared", contentKind: .plainText, category: nil
+            )
+        )
+        try model.acceptImportedData(Data("preview".utf8), declaredType: .plainText)
+        let trackedURL = try model.prepareTemporaryShare(of: item, as: .plainText)
+        let orphanURLs = [
+            root.appendingPathComponent("00000000-0000-0000-0000-000000000101.txt"),
+            root.appendingPathComponent("00000000-0000-0000-0000-000000000102.txt"),
+        ]
+        for orphanURL in orphanURLs {
+            try Data("orphan".utf8).write(to: orphanURL)
+        }
+        self.root = root
+        self.model = model
+        self.trackedURL = trackedURL
+        self.orphanURLs = orphanURLs
+    }
+
+    func purge() throws {
+        try model?.purgeDeletionRecoveryContent()
+    }
+
+    func recordBackendMutation() {
+        wasPurgedBeforeBackendMutation = isEmpty
+    }
+}
+
+@MainActor
+private final class UnremovedDeletionRecoveryState {
+    private var root: URL?
+    private var model: ImportExportViewModel?
+    private var orphanURL: URL?
+
+    var orphanStillExists: Bool {
+        orphanURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+    }
+
+    deinit {
+        if let root {
+            try? FileManager.default.removeItem(at: root)
+        }
+    }
+
+    func populate(for library: any PinnedLibrary) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let model = ImportExportViewModel(
+            library: library,
+            representations: { _ in [] },
+            temporaryDirectory: root,
+            removeTemporaryItem: { _ in }
+        )
+        let orphanURL = root.appendingPathComponent("00000000-0000-0000-0000-000000000201.txt")
+        try Data("orphan".utf8).write(to: orphanURL)
+        try model.acceptImportedData(Data("preview".utf8), declaredType: .plainText)
+        self.root = root
+        self.model = model
+        self.orphanURL = orphanURL
+    }
+
+    func purge() throws {
+        try model?.purgeDeletionRecoveryContent()
+    }
+}
+
+private struct SensitivePurgeFailure: Error, LocalizedError {
+    let plaintext: String
+
+    init(_ plaintext: String) {
+        self.plaintext = plaintext
+    }
+
+    var errorDescription: String? {
+        plaintext
+    }
+}
+
 private final class SnapshotClock: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Date
@@ -454,6 +684,8 @@ private actor SnapshotLibraryFake: ShareFixedIDPinnedLibrary {
     private let deleteBarrier: SnapshotBarrier?
     private let onDestructiveMutation: @Sendable () async -> Void
     private(set) var deleteCount = 0
+    private(set) var applyRemoteCount = 0
+    private(set) var resetCount = 0
 
     init(
         items: [PinnedRevision],
@@ -525,6 +757,7 @@ private actor SnapshotLibraryFake: ShareFixedIDPinnedLibrary {
     }
 
     func applyRemote(_ mutation: PinnedMutation) async throws -> MergeOutcome {
+        applyRemoteCount += 1
         switch mutation {
         case let .tombstone(tombstone):
             items.removeAll { $0.itemID == tombstone.itemID }
@@ -540,6 +773,7 @@ private actor SnapshotLibraryFake: ShareFixedIDPinnedLibrary {
     }
 
     func advanceResetGeneration() async throws -> LibraryResetGeneration {
+        resetCount += 1
         generation += 1
         items = []
         await onDestructiveMutation()

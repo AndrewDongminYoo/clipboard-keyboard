@@ -359,6 +359,30 @@ final class ImportExportViewModelTests: XCTestCase {
         XCTAssertFalse(importError.contains("FF"))
     }
 
+    func testDestructivePurgeClearsPreviewAndEveryOwnedTemporaryExportWithoutLimit() throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = makeModel(library: ImportLibraryFake(), temporaryDirectory: root)
+        let item = revision(representations: [
+            .init(kind: .plainText, originalBytes: Data("shared".utf8), keyedDigest: Data([1])),
+        ], canonical: "shared")
+        try model.acceptImportedData(Data("preview".utf8), declaredType: .plainText)
+        let tracked = try model.prepareTemporaryShare(of: item, as: .plainText)
+        let orphans = (0 ... 100).map { suffix in
+            root.appendingPathComponent("00000000-0000-0000-0000-\(String(format: "%012d", suffix)).txt")
+        }
+        for orphan in orphans {
+            try Data("orphan".utf8).write(to: orphan)
+        }
+
+        try model.purgeDeletionRecoveryContent()
+
+        XCTAssertNil(model.importPreview)
+        XCTAssertNil(model.temporaryShareURL)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: tracked.path))
+        XCTAssertTrue(orphans.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
+    }
+
     func testBoundedScavengeRemovesOnlyOwnedUUIDFilesAndPreservesUnrelatedFiles() throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }

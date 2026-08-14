@@ -190,6 +190,12 @@ final class ImportExportViewModel: ObservableObject {
         try? cleanupTrackedShare()
     }
 
+    func purgeDeletionRecoveryContent() throws {
+        cancelImport()
+        try cleanupTrackedShare()
+        try scavengeTemporaryExports(limit: .max)
+    }
+
     func viewDidDisappear() {
         importViewDidDisappear()
         shareViewDidDisappear()
@@ -218,6 +224,9 @@ final class ImportExportViewModel: ObservableObject {
         }
         for url in owned.prefix(max(0, limit)) {
             try removeTemporaryItem(url)
+            guard !FileManager.default.fileExists(atPath: url.path) else {
+                throw ImportExportViewModelError.temporaryRemovalIncomplete
+            }
         }
         if let trackedURL = temporaryFileOwner.trackedURL,
            !FileManager.default.fileExists(atPath: trackedURL.path)

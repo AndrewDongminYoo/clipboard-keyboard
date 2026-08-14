@@ -24,6 +24,7 @@ func observePhoneProtectedDataWillBecomeUnavailable(
 @MainActor
 final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
     var localMutationCommitted: (@MainActor @Sendable () async -> Void)?
+    var preDestructivePurge: (@MainActor @Sendable () throws -> Void)?
     private typealias Session = (backend: any PinnedLibrary, epoch: UInt64, lease: ProtectedDataLease)
 
     private let snapshotPublisher: any KeyboardSnapshotPublishing
@@ -276,6 +277,7 @@ final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
         let session = try currentBackend()
         let result = try await withSerializedSnapshotOperation(session) { session in
             let (backend, epoch, lease) = session
+            try purgeBeforeDestructiveMutation()
             try armFenceForDestructiveMutation()
             let result: PinnedTombstone
             do {
@@ -307,6 +309,7 @@ final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
             switch mutation {
             case .tombstone, .reset:
                 isDestructive = true
+                try purgeBeforeDestructiveMutation()
                 try armFenceForDestructiveMutation()
             case .revision:
                 isDestructive = false
@@ -346,6 +349,7 @@ final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
         let session = try currentBackend()
         let result = try await withSerializedSnapshotOperation(session) { session in
             let (backend, epoch, lease) = session
+            try purgeBeforeDestructiveMutation()
             try armFenceForDestructiveMutation()
             let result: LibraryResetGeneration
             do {
@@ -421,6 +425,14 @@ final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
             snapshotSafetyFailure = true
             snapshotSafetyReady = false
             throw error
+        }
+    }
+
+    private func purgeBeforeDestructiveMutation() throws {
+        do {
+            try preDestructivePurge?()
+        } catch {
+            throw contentFreeDestructiveError(error)
         }
     }
 
@@ -537,10 +549,17 @@ final class PhoneAppModel: ObservableObject {
             library: gate,
             representations: { text in try gate.representations(for: text) }
         )
-        importExportViewModel = ImportExportViewModel(
+        let filesModel = ImportExportViewModel(
             library: gate,
             representations: { raw in try gate.representations(for: raw) }
         )
+        importExportViewModel = filesModel
+        gate.preDestructivePurge = { [weak filesModel] in
+            guard let filesModel else {
+                throw KeyboardSnapshotPublisherError.publicationFailed
+            }
+            try filesModel.purgeDeletionRecoveryContent()
+        }
         syncEnabled = runtime.desiredSyncEnabled
         if let container = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: "group.kr.donminzzi.clipboardkeyboard"
