@@ -118,8 +118,14 @@ public struct ValueExtractor: Sendable {
         let digitCount = candidate.original.filter { $0.wholeNumberValue != nil }.count
         guard (8 ... 16).contains(digitCount) else { return false }
 
-        let context = nearbyContext(around: candidate.range, in: source)
+        let context = precedingContext(before: candidate.range, in: source)
         return context.range(of: #"주문\s*번호"#, options: .regularExpression) == nil
+    }
+
+    private func precedingContext(before range: NSRange, in source: String) -> String {
+        guard let sourceRange = Range(range, in: source) else { return "" }
+        let start = source.index(sourceRange.lowerBound, offsetBy: -24, limitedBy: source.startIndex) ?? source.startIndex
+        return String(source[start ..< sourceRange.lowerBound])
     }
 
     private func boundedContext(around range: NSRange, in source: String) -> String {

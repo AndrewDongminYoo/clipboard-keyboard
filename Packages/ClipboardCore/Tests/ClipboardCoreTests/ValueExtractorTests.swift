@@ -39,6 +39,16 @@ final class ValueExtractorTests: XCTestCase {
         XCTAssertNotEqual(account.context, source)
     }
 
+    func testAccountContextDoesNotRejectAccountWhenPunctuatedOrderNumberFollows() {
+        let candidates = ValueExtractor().candidates(in: "입금 계좌 123-456-789012, 주문번호 998877")
+
+        XCTAssertEqual(
+            candidates.filter { $0.kind == .accountNumber }.map(\.original),
+            ["123-456-789012"]
+        )
+        XCTAssertFalse(candidates.contains { $0.kind == .accountNumber && $0.original == "998877" })
+    }
+
     private func loadFixture() throws -> ValueFixture {
         let url = try XCTUnwrap(Bundle.module.url(
             forResource: "korean-value-cases",
