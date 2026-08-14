@@ -79,32 +79,32 @@ Do not start a later checkpoint until every automated check in the prior checkpo
 
 ## File Responsibility Map
 
-| Path | Responsibility |
-| --- | --- |
-| `project.yml` | Source of truth for app, extension, test targets, schemes, build settings, generated property lists, and target dependencies |
-| `Config/*.xcconfig` | Shared Swift, deployment, warning, and configuration settings without a committed team identifier |
-| `Packages/ClipboardCore/` | Platform-independent models, policies, transformations, extraction, search, snapshot schemas, repository ports, and sync state machines |
-| `Apps/macOS/App/` | macOS lifecycle, dependency composition, menu bar item, and app-visible state |
-| `Apps/macOS/Features/` | Palette, settings, onboarding, explicit save, pause, pin, import, export, and deletion UI |
-| `Apps/macOS/Infrastructure/Pasteboard/` | Pasteboard metadata reads, delayed payload reads, source-confidence tracking, watcher, and capture coordinator |
-| `Apps/macOS/Infrastructure/Content/` | AppKit-owned RTF text projection after the Privacy Gate |
-| `Apps/macOS/Infrastructure/Persistence/` | Keychain master key, authenticated encryption, encrypted local files, retention, and memory-only search index |
-| `Apps/macOS/Infrastructure/CloudKit/` | macOS-owned private-database `CKSyncEngine` adapter and record codec |
-| `Apps/macOS/Services/` | Private Copy Service and global palette shortcut |
-| `Apps/iOS/App/` | iPhone lifecycle and dependency composition |
-| `Apps/iOS/Features/` | Library, Extract, Settings, import, export, share, sync, deletion, and reset UI |
-| `Apps/iOS/Infrastructure/Persistence/` | Keychain-backed protected pinned working set |
-| `Apps/iOS/Infrastructure/Content/` | UIKit-owned RTF text projection for explicit import |
-| `Apps/iOS/Infrastructure/Pasteboard/` | The single explicit write-only containing-app pasteboard adapter |
-| `Apps/iOS/Infrastructure/Snapshot/` | Atomic `NSFileProtectionComplete` keyboard snapshot publication |
-| `Apps/iOS/Infrastructure/Share/` | Share inbox consumption, validation, commit, and cleanup |
-| `Apps/iOS/Infrastructure/CloudKit/` | iPhone-owned private-database `CKSyncEngine` adapter and record codec |
-| `Apps/iOS/Intents/` | `PinTextIntent`, `ExtractValuesIntent`, `FindPinnedIntent`, and App Shortcuts registration |
-| `Extensions/Keyboard/` | Read-only snapshot loader, local search UI, and `UITextDocumentProxy` insertion |
-| `Extensions/Share/` | Explicit one-item text or URL preview, Pin decision, protected inbox write, and terminal cleanup |
-| `Tests/` | Target-level tests and spies for Apple-framework adapters |
-| `scripts/` | Project generation, full verification, security source scans, and deterministic performance-fixture generation |
-| `docs/notes/` | Manual release evidence tied to a commit, hardware, operating-system build, and test configuration |
+| Path                                     | Responsibility                                                                                                                          |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `project.yml`                            | Source of truth for app, extension, test targets, schemes, build settings, generated property lists, and target dependencies            |
+| `Config/*.xcconfig`                      | Shared Swift, deployment, warning, and configuration settings without a committed team identifier                                       |
+| `Packages/ClipboardCore/`                | Platform-independent models, policies, transformations, extraction, search, snapshot schemas, repository ports, and sync state machines |
+| `Apps/macOS/App/`                        | macOS lifecycle, dependency composition, menu bar item, and app-visible state                                                           |
+| `Apps/macOS/Features/`                   | Palette, settings, onboarding, explicit save, pause, pin, import, export, and deletion UI                                               |
+| `Apps/macOS/Infrastructure/Pasteboard/`  | Pasteboard metadata reads, delayed payload reads, source-confidence tracking, watcher, and capture coordinator                          |
+| `Apps/macOS/Infrastructure/Content/`     | AppKit-owned RTF text projection after the Privacy Gate                                                                                 |
+| `Apps/macOS/Infrastructure/Persistence/` | Keychain master key, authenticated encryption, encrypted local files, retention, and memory-only search index                           |
+| `Apps/macOS/Infrastructure/CloudKit/`    | macOS-owned private-database `CKSyncEngine` adapter and record codec                                                                    |
+| `Apps/macOS/Services/`                   | Private Copy Service and global palette shortcut                                                                                        |
+| `Apps/iOS/App/`                          | iPhone lifecycle and dependency composition                                                                                             |
+| `Apps/iOS/Features/`                     | Library, Extract, Settings, import, export, share, sync, deletion, and reset UI                                                         |
+| `Apps/iOS/Infrastructure/Persistence/`   | Keychain-backed protected pinned working set                                                                                            |
+| `Apps/iOS/Infrastructure/Content/`       | UIKit-owned RTF text projection for explicit import                                                                                     |
+| `Apps/iOS/Infrastructure/Pasteboard/`    | The single explicit write-only containing-app pasteboard adapter                                                                        |
+| `Apps/iOS/Infrastructure/Snapshot/`      | Atomic `NSFileProtectionComplete` keyboard snapshot publication                                                                         |
+| `Apps/iOS/Infrastructure/Share/`         | Share inbox consumption, validation, commit, and cleanup                                                                                |
+| `Apps/iOS/Infrastructure/CloudKit/`      | iPhone-owned private-database `CKSyncEngine` adapter and record codec                                                                   |
+| `Apps/iOS/Intents/`                      | `PinTextIntent`, `ExtractValuesIntent`, `FindPinnedIntent`, and App Shortcuts registration                                              |
+| `Extensions/Keyboard/`                   | Read-only snapshot loader, local search UI, and `UITextDocumentProxy` insertion                                                         |
+| `Extensions/Share/`                      | Explicit one-item text or URL preview, Pin decision, protected inbox write, and terminal cleanup                                        |
+| `Tests/`                                 | Target-level tests and spies for Apple-framework adapters                                                                               |
+| `scripts/`                               | Project generation, full verification, security source scans, and deterministic performance-fixture generation                          |
+| `docs/notes/`                            | Manual release evidence tied to a commit, hardware, operating-system build, and test configuration                                      |
 
 ---
 
@@ -1748,29 +1748,29 @@ git commit -m "test: add Apple MVP release gates"
 
 ## Design Requirement Traceability
 
-| Approved design requirement | Implementation task | Primary verification |
-| --- | --- | --- |
-| Native macOS, iPhone, keyboard, and Share targets | Task 1 | Four sequential scheme builds and tests |
-| Automatic capture and sync disabled by default | Tasks 6-8 and 13 | Coordinator, settings, and sync-enable tests |
-| Privacy Gate before payload read or derivation | Tasks 2 and 6 | Read-order spies and confidential-marker integration tests |
-| Best-effort verified application ignore | Tasks 2, 6, and 15 | Source-confidence race and manual password-manager tests |
-| 24-hour or 200-item unpinned local retention | Tasks 2 and 5 | Retention boundary and encrypted-store tests |
-| Private Copy marker and 60-second pause | Task 7 | Service transaction tests and signed manual checks |
-| Original Plain Text, Markdown, RTF, HTML plus canonical insertion string | Task 3 | Representation and round-trip tests |
-| No character-count limit and no silent truncation | Tasks 3, 6, 9, 14, and 15 | Complete-read, large-input, file, and asset tests |
-| Deterministic extraction, conservative Korean account candidates | Tasks 3 and 9 | Versioned positive and negative fixtures |
-| Encrypted local stores and no plaintext fallback | Tasks 5 and 8 | Keychain denial, ciphertext, disk scan, and file-protection tests |
-| Only explicit pinned content reaches CloudKit | Tasks 4 and 13 | Pin-transition contract and unpinned-zero-write tests |
-| Private CloudKit encrypted fields and local search | Task 13 | CKRecord field audit and no encrypted-field query tests |
-| Encrypted asset above 512 KiB | Task 14 | 524,288 and 524,289 byte boundary tests |
-| Immutable revisions, conflict copies, deletion wins, tombstones, reset | Tasks 4 and 14 | Pure replica and two-device stale-reconnect tests |
-| Protected versioned App Group snapshot | Task 10 | Atomic replacement, file-protection, digest, and schema tests |
-| Full-Access-free read-only keyboard | Task 10 | Entitlement and forbidden-API audit plus insertion tests |
-| Explicit Share handoff and containing-app commit | Task 11 | Lifecycle, partial write, validation, and cleanup tests |
-| Three locally authenticated App Intents | Task 12 | Static policy, injected behavior, and locked-device checks |
-| TXT, MD, RTF, HTML item import/export/share | Tasks 7 and 9 | Exact round-trip and cancellation tests |
-| Content-free operational logging and no analytics SDK | Tasks 5 and 15 | Source audit and production dependency inspection |
-| Manual security, performance, and product-claim gates | Task 15 | Commit-tied release evidence with explicit gaps |
+| Approved design requirement                                              | Implementation task       | Primary verification                                              |
+| ------------------------------------------------------------------------ | ------------------------- | ----------------------------------------------------------------- |
+| Native macOS, iPhone, keyboard, and Share targets                        | Task 1                    | Four sequential scheme builds and tests                           |
+| Automatic capture and sync disabled by default                           | Tasks 6-8 and 13          | Coordinator, settings, and sync-enable tests                      |
+| Privacy Gate before payload read or derivation                           | Tasks 2 and 6             | Read-order spies and confidential-marker integration tests        |
+| Best-effort verified application ignore                                  | Tasks 2, 6, and 15        | Source-confidence race and manual password-manager tests          |
+| 24-hour or 200-item unpinned local retention                             | Tasks 2 and 5             | Retention boundary and encrypted-store tests                      |
+| Private Copy marker and 60-second pause                                  | Task 7                    | Service transaction tests and signed manual checks                |
+| Original Plain Text, Markdown, RTF, HTML plus canonical insertion string | Task 3                    | Representation and round-trip tests                               |
+| No character-count limit and no silent truncation                        | Tasks 3, 6, 9, 14, and 15 | Complete-read, large-input, file, and asset tests                 |
+| Deterministic extraction, conservative Korean account candidates         | Tasks 3 and 9             | Versioned positive and negative fixtures                          |
+| Encrypted local stores and no plaintext fallback                         | Tasks 5 and 8             | Keychain denial, ciphertext, disk scan, and file-protection tests |
+| Only explicit pinned content reaches CloudKit                            | Tasks 4 and 13            | Pin-transition contract and unpinned-zero-write tests             |
+| Private CloudKit encrypted fields and local search                       | Task 13                   | CKRecord field audit and no encrypted-field query tests           |
+| Encrypted asset above 512 KiB                                            | Task 14                   | 524,288 and 524,289 byte boundary tests                           |
+| Immutable revisions, conflict copies, deletion wins, tombstones, reset   | Tasks 4 and 14            | Pure replica and two-device stale-reconnect tests                 |
+| Protected versioned App Group snapshot                                   | Task 10                   | Atomic replacement, file-protection, digest, and schema tests     |
+| Full-Access-free read-only keyboard                                      | Task 10                   | Entitlement and forbidden-API audit plus insertion tests          |
+| Explicit Share handoff and containing-app commit                         | Task 11                   | Lifecycle, partial write, validation, and cleanup tests           |
+| Three locally authenticated App Intents                                  | Task 12                   | Static policy, injected behavior, and locked-device checks        |
+| TXT, MD, RTF, HTML item import/export/share                              | Tasks 7 and 9             | Exact round-trip and cancellation tests                           |
+| Content-free operational logging and no analytics SDK                    | Tasks 5 and 15            | Source audit and production dependency inspection                 |
+| Manual security, performance, and product-claim gates                    | Task 15                   | Commit-tied release evidence with explicit gaps                   |
 
 ## Final Completion Gate
 
