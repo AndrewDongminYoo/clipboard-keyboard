@@ -10,11 +10,18 @@ actor LocalMacPinnedLibrary: PinnedLibrary {
     private let store: EncryptedMacPinnedStore
     private let deviceID: String
     private let now: @Sendable () -> Date
+    private let notifier: @Sendable () async -> Void
 
-    init(store: EncryptedMacPinnedStore, deviceID: String, now: @escaping @Sendable () -> Date = Date.init) {
+    init(
+        store: EncryptedMacPinnedStore,
+        deviceID: String,
+        now: @escaping @Sendable () -> Date = Date.init,
+        notifier: @escaping @Sendable () async -> Void = {}
+    ) {
         self.store = store
         self.deviceID = deviceID
         self.now = now
+        self.notifier = notifier
     }
 
     func allItems() async throws -> [PinnedRevision] {
@@ -41,7 +48,7 @@ actor LocalMacPinnedLibrary: PinnedLibrary {
         let revisionID = UUID()
         let modifiedAt = now()
         let deviceID = deviceID
-        return try await store.transaction { state in
+        let revision = try await store.transaction { state in
             let revision = PinnedRevision(
                 itemID: itemID, revisionID: revisionID, libraryGeneration: state.libraryGeneration,
                 itemGeneration: 1, modifiedAt: modifiedAt, deviceID: deviceID, payload: payload
@@ -49,13 +56,15 @@ actor LocalMacPinnedLibrary: PinnedLibrary {
             Self.applyLocal(.revision(revision), to: &state)
             return revision
         }
+        await notifier()
+        return revision
     }
 
     func revise(itemID: UUID, payload: PinPayload) async throws -> PinnedRevision {
         let revisionID = UUID()
         let modifiedAt = now()
         let deviceID = deviceID
-        return try await store.transaction { state in
+        let revision = try await store.transaction { state in
             guard let current = state.primaryRevisions.first(where: { $0.itemID == itemID }) else {
                 throw LocalMacPinnedLibraryError.itemNotFound
             }
@@ -66,13 +75,15 @@ actor LocalMacPinnedLibrary: PinnedLibrary {
             Self.applyLocal(.revision(revision), to: &state)
             return revision
         }
+        await notifier()
+        return revision
     }
 
     func delete(itemID: UUID) async throws -> PinnedTombstone {
         let tombstoneID = UUID()
         let modifiedAt = now()
         let deviceID = deviceID
-        return try await store.transaction { state in
+        let tombstone = try await store.transaction { state in
             guard let current = state.primaryRevisions.first(where: { $0.itemID == itemID }) else {
                 throw LocalMacPinnedLibraryError.itemNotFound
             }
@@ -83,6 +94,8 @@ actor LocalMacPinnedLibrary: PinnedLibrary {
             Self.applyLocal(.tombstone(tombstone), to: &state)
             return tombstone
         }
+        await notifier()
+        return tombstone
     }
 
     func applyRemote(_ mutation: PinnedMutation) async throws -> MergeOutcome {
@@ -98,7 +111,7 @@ actor LocalMacPinnedLibrary: PinnedLibrary {
         let resetID = UUID()
         let modifiedAt = now()
         let deviceID = deviceID
-        return try await store.transaction { state in
+        let reset = try await store.transaction { state in
             let reset = LibraryResetGeneration(
                 resetID: resetID, generation: state.libraryGeneration + 1,
                 modifiedAt: modifiedAt, deviceID: deviceID
@@ -106,6 +119,8 @@ actor LocalMacPinnedLibrary: PinnedLibrary {
             Self.applyLocal(.reset(reset), to: &state)
             return reset
         }
+        await notifier()
+        return reset
     }
 
     private static func applyLocal(_ mutation: PinnedMutation, to state: inout PinnedReplicaState) {

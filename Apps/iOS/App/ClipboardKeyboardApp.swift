@@ -41,8 +41,16 @@ private struct PhoneRootView: View {
             ExtractView(model: model.extractViewModel)
                 .tabItem { Label("Extract", systemImage: "text.viewfinder") }
 
-            PhoneSettingsView(storageStatus: libraryViewModel.storageStatus, filesModel: model.importExportViewModel)
-                .tabItem { Label("Settings", systemImage: "gearshape") }
+            PhoneSettingsView(
+                storageStatus: libraryViewModel.storageStatus,
+                filesModel: model.importExportViewModel,
+                syncStatus: model.syncStatus,
+                syncEnabled: $model.syncEnabled,
+                recoveryActionInProgress: model.recoveryActionInProgress,
+                keepLocalAndTurnSyncOff: { await model.keepLocalAndTurnSyncOff() },
+                reuploadLocalPins: { await model.reuploadLocalPins() }
+            )
+            .tabItem { Label("Settings", systemImage: "gearshape") }
         }
         .sheet(
             isPresented: Binding(

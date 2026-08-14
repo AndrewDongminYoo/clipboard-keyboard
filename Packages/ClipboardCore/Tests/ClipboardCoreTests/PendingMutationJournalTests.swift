@@ -67,6 +67,96 @@ final class PendingMutationJournalTests: XCTestCase {
         XCTAssertEqual(forward.pending.count, 1)
     }
 
+    func testAcknowledgeRemovesOnlyTheExactSuccessfulMutationIDs() {
+        let first = reset(id: uuid(1), generation: 1, modifiedAt: 10, deviceID: "a")
+        let second = reset(id: uuid(2), generation: 1, modifiedAt: 20, deviceID: "a")
+        let third = reset(id: uuid(3), generation: 1, modifiedAt: 30, deviceID: "a")
+        var journal = PendingMutationJournal(pending: [first, second, third])
+
+        journal.acknowledge(mutationIDs: [first.mutationID, third.mutationID])
+
+        XCTAssertEqual(journal.pending, [second])
+    }
+
+    func testReplaceForRecoveryRequeuesCurrentNormalizedStateInCanonicalOrder() {
+        let reset = LibraryResetGeneration(
+            resetID: uuid(10),
+            generation: 7,
+            modifiedAt: Date(timeIntervalSince1970: 10),
+            deviceID: "reset"
+        )
+        let conflict = revision(
+            itemID: uuid(11),
+            revisionID: uuid(12),
+            generation: 7,
+            itemGeneration: 2,
+            modifiedAt: 20,
+            deviceID: "conflict",
+            value: "conflict"
+        )
+        let primary = revision(
+            itemID: conflict.itemID,
+            revisionID: uuid(13),
+            generation: 7,
+            itemGeneration: 2,
+            modifiedAt: 30,
+            deviceID: "primary",
+            value: "primary"
+        )
+        let acknowledgedPrimary = revision(
+            itemID: uuid(14),
+            revisionID: uuid(15),
+            generation: 7,
+            itemGeneration: 1,
+            modifiedAt: 40,
+            deviceID: "acknowledged",
+            value: "acknowledged"
+        )
+        let tombstone = PinnedTombstone(
+            itemID: uuid(16),
+            tombstoneID: uuid(17),
+            libraryGeneration: 7,
+            itemGeneration: 3,
+            modifiedAt: Date(timeIntervalSince1970: 50),
+            deviceID: "delete"
+        )
+        let obsolete = revision(
+            itemID: uuid(18),
+            revisionID: uuid(19),
+            generation: 6,
+            itemGeneration: 1,
+            modifiedAt: 60,
+            deviceID: "stale",
+            value: "obsolete"
+        )
+        let state = PinnedReplicaState(
+            libraryGeneration: 7,
+            reset: reset,
+            primaryRevisions: [acknowledgedPrimary, conflict, primary],
+            conflictCopies: [PinnedConflictCopy(revision: conflict)],
+            tombstones: [tombstone]
+        )
+        let expected: [PinnedMutation] = [
+            .reset(reset),
+            .revision(conflict),
+            .revision(primary),
+            .revision(acknowledgedPrimary),
+            .tombstone(tombstone),
+        ]
+        var journal = PendingMutationJournal(pending: [.revision(obsolete)])
+
+        journal.replaceForRecovery(with: state)
+
+        XCTAssertEqual(journal.pending, expected)
+        XCTAssertFalse(journal.pending.contains(.revision(obsolete)))
+        XCTAssertTrue(journal.pending.contains(.revision(acknowledgedPrimary)))
+        XCTAssertEqual(Set(journal.pending.map(\.mutationID)), Set(expected.map(\.mutationID)))
+
+        journal.replaceForRecovery(with: state)
+
+        XCTAssertEqual(journal.pending, expected)
+    }
+
     private func reset(id: UUID, generation: Int64, modifiedAt: TimeInterval, deviceID: String) -> PinnedMutation {
         .reset(
             LibraryResetGeneration(
@@ -74,6 +164,38 @@ final class PendingMutationJournalTests: XCTestCase {
                 generation: generation,
                 modifiedAt: Date(timeIntervalSince1970: modifiedAt),
                 deviceID: deviceID
+            )
+        )
+    }
+
+    private func revision(
+        itemID: UUID,
+        revisionID: UUID,
+        generation: Int64,
+        itemGeneration: Int64,
+        modifiedAt: TimeInterval,
+        deviceID: String,
+        value: String
+    ) -> PinnedRevision {
+        PinnedRevision(
+            itemID: itemID,
+            revisionID: revisionID,
+            libraryGeneration: generation,
+            itemGeneration: itemGeneration,
+            modifiedAt: Date(timeIntervalSince1970: modifiedAt),
+            deviceID: deviceID,
+            payload: PinPayload(
+                representations: [
+                    ClipRepresentation(
+                        kind: .plainText,
+                        originalBytes: Data(value.utf8),
+                        keyedDigest: Data([1])
+                    ),
+                ],
+                canonicalInsertionString: value,
+                title: value,
+                contentKind: .plainText,
+                category: .everyday
             )
         )
     }

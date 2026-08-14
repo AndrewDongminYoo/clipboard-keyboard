@@ -23,6 +23,7 @@ func observePhoneProtectedDataWillBecomeUnavailable(
 
 @MainActor
 final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
+    var localMutationCommitted: (@MainActor @Sendable () async -> Void)?
     private typealias Session = (backend: any PinnedLibrary, epoch: UInt64, lease: ProtectedDataLease)
 
     private let snapshotPublisher: any KeyboardSnapshotPublishing
@@ -191,7 +192,7 @@ final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
 
     func pin(_ payload: PinPayload) async throws -> PinnedRevision {
         let session = try currentBackend()
-        return try await withSerializedSnapshotOperation(session) { session in
+        let result = try await withSerializedSnapshotOperation(session) { session in
             let (backend, epoch, lease) = session
             let result = try await backend.pin(payload)
             try validate(epoch, lease: lease)
@@ -199,11 +200,13 @@ final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
             try? await refreshKeyboardSnapshotLocked(session)
             return result
         }
+        await localMutationCommitted?()
+        return result
     }
 
     func pinForIntent(_ payload: PinPayload) async throws -> IntentPinCommit {
         let session = try currentBackend()
-        return try await withSerializedSnapshotOperation(session) { session in
+        let result = try await withSerializedSnapshotOperation(session) { session in
             let (backend, epoch, lease) = session
             guard let intentBackend = backend as? any IntentPinCommittingLibrary else {
                 throw LocalPinnedLibraryError.itemNotFound
@@ -215,6 +218,8 @@ final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
             }
             return result
         }
+        await localMutationCommitted?()
+        return result
     }
 
     func ensurePinnedShareItem(_ item: ShareInboxItem) async throws -> SharePinEnsureResult {
@@ -234,7 +239,7 @@ final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
             category: nil
         )
         let session = try currentBackend()
-        return try await withSerializedSnapshotOperation(session) { session in
+        let result = try await withSerializedSnapshotOperation(session) { session in
             let (backend, epoch, lease) = session
             guard let fixedIDBackend = backend as? any ShareFixedIDPinnedLibrary else {
                 throw LocalPinnedLibraryError.itemNotFound
@@ -247,11 +252,15 @@ final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
             }
             return result
         }
+        if case .inserted = result {
+            await localMutationCommitted?()
+        }
+        return result
     }
 
     func revise(itemID: UUID, payload: PinPayload) async throws -> PinnedRevision {
         let session = try currentBackend()
-        return try await withSerializedSnapshotOperation(session) { session in
+        let result = try await withSerializedSnapshotOperation(session) { session in
             let (backend, epoch, lease) = session
             let result = try await backend.revise(itemID: itemID, payload: payload)
             try validate(epoch, lease: lease)
@@ -259,11 +268,13 @@ final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
             try? await refreshKeyboardSnapshotLocked(session)
             return result
         }
+        await localMutationCommitted?()
+        return result
     }
 
     func delete(itemID: UUID) async throws -> PinnedTombstone {
         let session = try currentBackend()
-        return try await withSerializedSnapshotOperation(session) { session in
+        let result = try await withSerializedSnapshotOperation(session) { session in
             let (backend, epoch, lease) = session
             try armFenceForDestructiveMutation()
             let result: PinnedTombstone
@@ -284,6 +295,8 @@ final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
             }
             return result
         }
+        await localMutationCommitted?()
+        return result
     }
 
     func applyRemote(_ mutation: PinnedMutation) async throws -> MergeOutcome {
@@ -314,7 +327,6 @@ final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
                 try validate(epoch, lease: lease)
             }
             snapshotGeneration = max(snapshotGeneration, mutation.libraryGeneration)
-            lastSuccessfulCloudRefresh = now()
             if isDestructive {
                 do {
                     try await completeDestructiveSnapshotLocked(backend: backend, epoch: epoch, lease: lease)
@@ -332,7 +344,7 @@ final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
 
     func advanceResetGeneration() async throws -> LibraryResetGeneration {
         let session = try currentBackend()
-        return try await withSerializedSnapshotOperation(session) { session in
+        let result = try await withSerializedSnapshotOperation(session) { session in
             let (backend, epoch, lease) = session
             try armFenceForDestructiveMutation()
             let result: LibraryResetGeneration
@@ -353,6 +365,8 @@ final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
             }
             return result
         }
+        await localMutationCommitted?()
+        return result
     }
 
     func refreshKeyboardSnapshot() async throws {
@@ -360,6 +374,11 @@ final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
         try await withSerializedSnapshotOperation(session) { session in
             try await refreshKeyboardSnapshotLocked(session)
         }
+    }
+
+    func markCloudRefreshSucceeded() async throws {
+        lastSuccessfulCloudRefresh = now()
+        try await refreshKeyboardSnapshot()
     }
 
     private func refreshKeyboardSnapshotLocked(_ session: Session) async throws {
@@ -489,10 +508,20 @@ final class PhoneAppModel: ObservableObject {
     @Published private(set) var pendingShare: ShareInboxItem?
     @Published private(set) var shareCommitInProgress = false
     @Published private(set) var shareErrorMessage: String?
+    @Published private(set) var syncStatus: PhonePinnedSyncStatus = .disabled
+    @Published private(set) var recoveryActionInProgress = false
+    @Published var syncEnabled = false {
+        didSet {
+            guard !isApplyingRecoveryPreference else { return }
+            let enabled = syncEnabled
+            Task { [runtime] in await runtime.setSyncEnabled(enabled) }
+        }
+    }
 
     private let runtime: IntentDependencies
     private let shareInboxConsumer: ShareInboxConsumer?
     private var observers: Set<AnyCancellable> = []
+    private var isApplyingRecoveryPreference = false
 
     init(runtime: IntentDependencies = IntentDependencies()) {
         let protectedDataAvailable = UIApplication.shared.isProtectedDataAvailable
@@ -510,6 +539,7 @@ final class PhoneAppModel: ObservableObject {
             library: gate,
             representations: { raw in try gate.representations(for: raw) }
         )
+        syncEnabled = runtime.desiredSyncEnabled
         if let container = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: "group.kr.donminzzi.clipboardkeyboard"
         ) {
@@ -520,6 +550,10 @@ final class PhoneAppModel: ObservableObject {
         } else {
             shareInboxConsumer = nil
         }
+        runtime.installRemoteContentChanged { [weak libraryViewModel] in
+            await libraryViewModel?.load()
+        }
+        runtime.installSyncStatusChanged { [weak self] status in self?.syncStatus = status }
 
         observeProtectedDataLifecycle()
         if protectedDataAvailable {
@@ -532,8 +566,26 @@ final class PhoneAppModel: ObservableObject {
 
     func sceneDidBecomeActive() async {
         guard UIApplication.shared.isProtectedDataAvailable, runtime.isReady else { return }
+        await runtime.refreshSync()
         shareInboxConsumer?.protectedDataDidBecomeAvailable()
         await refreshShareInbox()
+    }
+
+    func keepLocalAndTurnSyncOff() async {
+        guard !recoveryActionInProgress else { return }
+        recoveryActionInProgress = true
+        await runtime.keepLocalAndTurnSyncOff()
+        isApplyingRecoveryPreference = true
+        syncEnabled = false
+        isApplyingRecoveryPreference = false
+        recoveryActionInProgress = false
+    }
+
+    func reuploadLocalPins() async {
+        guard !recoveryActionInProgress else { return }
+        recoveryActionInProgress = true
+        try? await runtime.reuploadLocalPins()
+        recoveryActionInProgress = false
     }
 
     func confirmPendingShare() async {

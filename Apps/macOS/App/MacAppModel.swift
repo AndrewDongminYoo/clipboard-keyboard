@@ -10,6 +10,20 @@ protocol MacCaptureWatching: AnyObject {
     func stop()
 }
 
+private final class MacPinnedSyncSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var engine: MacPinnedSyncEngine?
+
+    func install(_ engine: MacPinnedSyncEngine) {
+        lock.withLock { self.engine = engine }
+    }
+
+    func notify() async {
+        let engine: MacPinnedSyncEngine? = lock.withLock { self.engine }
+        await engine?.localJournalDidChange()
+    }
+}
+
 extension PasteboardWatcher: MacCaptureWatching {}
 
 @MainActor
@@ -32,6 +46,12 @@ final class MacAppModel: ObservableObject {
     private let sourceTracker: any SourceObservationTracking
     private let now: () -> Date
     private let digestProvider: ((Data) throws -> Data)?
+    private let setSyncEnabled: (@Sendable (Bool) async -> Void)?
+    private let keepLocalRecovery: (@Sendable () async -> Void)?
+    private let reuploadRecovery: (@Sendable () async throws -> Void)?
+    private let beforeSyncReconciliation: @MainActor @Sendable () async -> Void
+    private var syncReconciliationRevision: UInt64 = 0
+    private var syncReconciliationTask: Task<Void, Never>?
 
     private init(
         settings: MacSettingsModel,
@@ -46,7 +66,12 @@ final class MacAppModel: ObservableObject {
         watcher: any MacCaptureWatching = PasteboardWatcher(),
         capturePasteboard: any MacPasteboardReading = MacPasteboardClient(),
         sourceTracker: any SourceObservationTracking = SourceObservationTracker(),
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        pinnedSyncEngine: MacPinnedSyncEngine? = nil,
+        setSyncEnabled: (@Sendable (Bool) async -> Void)? = nil,
+        keepLocalRecovery: (@Sendable () async -> Void)? = nil,
+        reuploadRecovery: (@Sendable () async throws -> Void)? = nil,
+        beforeSyncReconciliation: @escaping @MainActor @Sendable () async -> Void = {}
     ) {
         self.settings = settings
         self.shortcut = shortcut
@@ -61,6 +86,28 @@ final class MacAppModel: ObservableObject {
         self.capturePasteboard = capturePasteboard
         self.sourceTracker = sourceTracker
         self.now = now
+        if let setSyncEnabled {
+            self.setSyncEnabled = setSyncEnabled
+        } else if let pinnedSyncEngine {
+            self.setSyncEnabled = { enabled in try? await pinnedSyncEngine.setEnabled(enabled) }
+        } else {
+            self.setSyncEnabled = nil
+        }
+        if let keepLocalRecovery {
+            self.keepLocalRecovery = keepLocalRecovery
+        } else if let pinnedSyncEngine {
+            self.keepLocalRecovery = { await pinnedSyncEngine.keepLocalAndDisable() }
+        } else {
+            self.keepLocalRecovery = nil
+        }
+        if let reuploadRecovery {
+            self.reuploadRecovery = reuploadRecovery
+        } else if let pinnedSyncEngine {
+            self.reuploadRecovery = { try await pinnedSyncEngine.reuploadLocalPins() }
+        } else {
+            self.reuploadRecovery = nil
+        }
+        self.beforeSyncReconciliation = beforeSyncReconciliation
         panelController = PalettePanelController(viewModel: paletteViewModel, settings: settings, fallback: privateCopyFallback)
         statusItemController = StatusItemController(panelController: panelController)
         shortcut.setHandler { [weak panelController] in panelController?.toggle() }
@@ -79,6 +126,25 @@ final class MacAppModel: ObservableObject {
             }
         }
         privateCopyService.failureHandler = { [weak self] in self?.privateCopyFallback.serviceDidFail() }
+        settings.syncEnabledChanged = { [weak self] _ in
+            guard let self else { return }
+            let revision = self.requestSyncReconciliation()
+            guard !self.settings.syncEnabled else { return }
+            Task { @MainActor [weak self] in
+                guard let self,
+                      revision == self.syncReconciliationRevision,
+                      !self.settings.syncEnabled,
+                      let setSyncEnabled = self.setSyncEnabled
+                else { return }
+                await setSyncEnabled(false)
+            }
+        }
+        settings.keepLocalRecoveryRequested = { [weak self] in
+            await self?.keepLocalRecovery?()
+        }
+        settings.reuploadRecoveryRequested = { [weak self] in
+            try await self?.reuploadRecovery?()
+        }
     }
 
     static func makeLive() -> MacAppModel {
@@ -105,10 +171,58 @@ final class MacAppModel: ObservableObject {
                 fileURL: root.appendingPathComponent("Pinned/pinned-replica.encrypted"),
                 key: key
             )
+            let syncSignal = MacPinnedSyncSignal()
             let pinnedLibrary = LocalMacPinnedLibrary(
                 store: pinnedStore,
-                deviceID: Host.current().localizedName ?? "mac"
+                deviceID: Host.current().localizedName ?? "mac",
+                notifier: { await syncSignal.notify() }
             )
+            let syncStateStore = MacSyncStateStore(
+                fileURL: root.appendingPathComponent("CloudKit/sync-state.encrypted"),
+                key: key
+            )
+            let syncEngine = MacPinnedSyncEngine(
+                makeTransport: { MacCloudKitTransport(stateStore: syncStateStore) },
+                pendingMutations: { try await pinnedStore.load().pendingJournal.pending },
+                acknowledge: { ids in
+                    try await pinnedStore.transaction { state in
+                        var journal = state.pendingJournal
+                        journal.acknowledge(mutationIDs: ids)
+                        state = PinnedReplicaState(
+                            libraryGeneration: state.libraryGeneration,
+                            reset: state.reset,
+                            primaryRevisions: state.primaryRevisions,
+                            conflictCopies: state.conflictCopies,
+                            tombstones: state.tombstones,
+                            seenMutationIDs: state.seenMutationIDs,
+                            pendingJournal: journal
+                        )
+                    }
+                },
+                applyRemote: { mutation in _ = try await pinnedLibrary.applyRemote(mutation) },
+                requeueForRecovery: {
+                    try await pinnedStore.transaction { state in
+                        var journal = state.pendingJournal
+                        journal.replaceForRecovery(with: state)
+                        state = PinnedReplicaState(
+                            libraryGeneration: state.libraryGeneration,
+                            reset: state.reset,
+                            primaryRevisions: state.primaryRevisions,
+                            conflictCopies: state.conflictCopies,
+                            tombstones: state.tombstones,
+                            seenMutationIDs: state.seenMutationIDs,
+                            pendingJournal: journal
+                        )
+                    }
+                },
+                resetSyncStateForRecovery: { try await syncStateStore.resetForRecovery() }
+            )
+            Task {
+                await syncEngine.installStatusObserver { status in
+                    await MainActor.run { settings.syncStatus = status }
+                }
+            }
+            syncSignal.install(syncEngine)
             let dataSource = LivePaletteDataSource(historyStore: historyStore, pinnedLibrary: pinnedLibrary)
             let viewModel = PaletteViewModel(
                 dataSource: dataSource,
@@ -126,7 +240,8 @@ final class MacAppModel: ObservableObject {
                 liveDataSource: dataSource,
                 historyRoot: root.appendingPathComponent("History", isDirectory: true),
                 historyKey: key,
-                digestProvider: digest
+                digestProvider: digest,
+                pinnedSyncEngine: syncEngine
             )
         } catch {
             settings.protectedStorageLocked = true
@@ -155,6 +270,9 @@ final class MacAppModel: ObservableObject {
             _ = settings.updateShortcut(.defaultPalette, using: shortcut)
         }
         configureCapture(enabled: settings.captureConsentGranted)
+        if settings.syncEnabled {
+            requestSyncReconciliation()
+        }
     }
 
     func pauseCaptureFor60Seconds() {
@@ -225,14 +343,48 @@ final class MacAppModel: ObservableObject {
         watcher: any MacCaptureWatching,
         capturePasteboard: any MacPasteboardReading,
         sourceTracker: any SourceObservationTracking,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        setSyncEnabled: (@Sendable (Bool) async -> Void)? = nil,
+        keepLocalRecovery: (@Sendable () async -> Void)? = nil,
+        reuploadRecovery: (@Sendable () async throws -> Void)? = nil,
+        beforeSyncReconciliation: @escaping @MainActor @Sendable () async -> Void = {}
     ) -> MacAppModel {
         MacAppModel(
             settings: settings, shortcut: shortcut, privateCopyService: privateCopyService,
             paletteViewModel: paletteViewModel, historyStore: historyStore, liveDataSource: nil,
             historyRoot: nil, historyKey: nil, digestProvider: digestProvider, watcher: watcher,
-            capturePasteboard: capturePasteboard, sourceTracker: sourceTracker, now: now
+            capturePasteboard: capturePasteboard, sourceTracker: sourceTracker, now: now,
+            setSyncEnabled: setSyncEnabled, keepLocalRecovery: keepLocalRecovery,
+            reuploadRecovery: reuploadRecovery, beforeSyncReconciliation: beforeSyncReconciliation
         )
+    }
+
+    @discardableResult
+    private func requestSyncReconciliation() -> UInt64 {
+        syncReconciliationRevision &+= 1
+        let revision = syncReconciliationRevision
+        guard setSyncEnabled != nil, syncReconciliationTask == nil else { return revision }
+        syncReconciliationTask = Task { @MainActor [weak self] in
+            await self?.runSyncReconciliation()
+        }
+        return revision
+    }
+
+    private func runSyncReconciliation() async {
+        while true {
+            await beforeSyncReconciliation()
+            let revision = syncReconciliationRevision
+            let enabled = settings.syncEnabled
+            guard let setSyncEnabled else {
+                syncReconciliationTask = nil
+                return
+            }
+            await setSyncEnabled(enabled)
+            guard revision != syncReconciliationRevision else {
+                syncReconciliationTask = nil
+                return
+            }
+        }
     }
 
     private static func applicationSupportRoot() throws -> URL {

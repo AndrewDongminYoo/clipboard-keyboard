@@ -29,6 +29,40 @@ final class PhonePinnedLibrarySnapshotTests: XCTestCase {
         XCTAssertEqual(publisher.publishCount, 3)
     }
 
+    func testRemoteRevisionRefreshesSnapshotWithoutEnqueuingLocalNotification() async throws {
+        let publisher = SnapshotPublisherSpy()
+        let backend = SnapshotLibraryFake(items: [])
+        let gate = installedGate(publisher: publisher, backend: backend)
+        var localNotificationCount = 0
+        gate.localMutationCommitted = { localNotificationCount += 1 }
+        let remote = revision(44)
+
+        _ = try await gate.applyRemote(.revision(remote))
+        _ = try await gate.applyRemote(.revision(remote))
+
+        XCTAssertEqual(publisher.publishedItemIDs.last, Set([remote.itemID]))
+        XCTAssertEqual(localNotificationCount, 0)
+    }
+
+    func testRemoteMutationWithoutCompletedFetchKeepsPriorRefreshTimestampUntilExplicitSuccess() async throws {
+        let clock = SnapshotClock(now: Date(timeIntervalSince1970: 100))
+        let publisher = SnapshotPublisherSpy()
+        let backend = SnapshotLibraryFake(items: [])
+        let gate = PhonePinnedLibraryGate(snapshotPublisher: publisher, now: { clock.now() })
+        let unlock = gate.beginUnlock()
+        XCTAssertTrue(gate.install(backend, for: unlock, generation: 1))
+
+        try await gate.markCloudRefreshSucceeded()
+        clock.set(Date(timeIntervalSince1970: 200))
+        _ = try await gate.applyRemote(.revision(revision(45)))
+
+        XCTAssertEqual(publisher.lastCloudRefreshes.last, Date(timeIntervalSince1970: 100))
+
+        clock.set(Date(timeIntervalSince1970: 300))
+        try await gate.markCloudRefreshSucceeded()
+        XCTAssertEqual(publisher.lastCloudRefreshes.last, Date(timeIntervalSince1970: 300))
+    }
+
     func testStaleMutationCompletionAfterLockCannotRepublishContent() async throws {
         let barrier = SnapshotBarrier()
         let publisher = SnapshotPublisherSpy()
@@ -325,6 +359,23 @@ final class PhonePinnedLibrarySnapshotTests: XCTestCase {
     }
 }
 
+private final class SnapshotClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Date
+
+    init(now: Date) {
+        value = now
+    }
+
+    func now() -> Date {
+        lock.withLock { value }
+    }
+
+    func set(_ value: Date) {
+        lock.withLock { self.value = value }
+    }
+}
+
 @MainActor
 private final class SnapshotPublisherSpy: KeyboardSnapshotPublishing {
     var failPublish = false
@@ -333,6 +384,7 @@ private final class SnapshotPublisherSpy: KeyboardSnapshotPublishing {
     private let monitoredStaleItemID: UUID?
     private(set) var publishedItemIDs: [Set<UUID>] = []
     private(set) var generations: [Int64] = []
+    private(set) var lastCloudRefreshes: [Date?] = []
     private(set) var armCount = 0
     private(set) var destructivePublicationCount = 0
     private(set) var fenceArmed = false
@@ -347,7 +399,7 @@ private final class SnapshotPublisherSpy: KeyboardSnapshotPublishing {
         publishedItemIDs.count
     }
 
-    func publish(items: [PinnedRevision], generation: Int64, lastCloudRefresh _: Date?) throws {
+    func publish(items: [PinnedRevision], generation: Int64, lastCloudRefresh: Date?) throws {
         if failPublish {
             throw SnapshotTestFailure.injected
         }
@@ -360,6 +412,7 @@ private final class SnapshotPublisherSpy: KeyboardSnapshotPublishing {
         }
         publishedItemIDs.append(itemIDs)
         generations.append(generation)
+        lastCloudRefreshes.append(lastCloudRefresh)
     }
 
     func armRevocationFence() throws {
@@ -373,13 +426,13 @@ private final class SnapshotPublisherSpy: KeyboardSnapshotPublishing {
     func completeDestructivePublication(
         items: [PinnedRevision],
         generation: Int64,
-        lastCloudRefresh _: Date?
+        lastCloudRefresh: Date?
     ) throws {
         destructivePublicationCount += 1
         if failDestructivePublication {
             throw KeyboardSnapshotPublisherError.publicationFailed
         }
-        try publish(items: items, generation: generation, lastCloudRefresh: nil)
+        try publish(items: items, generation: generation, lastCloudRefresh: lastCloudRefresh)
         fenceArmed = false
     }
 
@@ -479,8 +532,9 @@ private actor SnapshotLibraryFake: ShareFixedIDPinnedLibrary {
         case .reset:
             items = []
             await onDestructiveMutation()
-        case .revision:
-            break
+        case let .revision(revision):
+            items.removeAll { $0.itemID == revision.itemID }
+            items.append(revision)
         }
         return .inserted(mutation.mutationID)
     }

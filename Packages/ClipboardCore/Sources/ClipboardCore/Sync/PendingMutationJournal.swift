@@ -24,8 +24,22 @@ public struct PendingMutationJournal: Codable, Equatable, Sendable {
         pending.removeAll { $0.mutationID == mutationID }
     }
 
+    public mutating func acknowledge<S: Sequence>(mutationIDs: S) where S.Element == UUID {
+        let acknowledged = Set(mutationIDs)
+        pending.removeAll { acknowledged.contains($0.mutationID) }
+    }
+
     public mutating func purge(staleBeforeLibraryGeneration generation: Int64) {
         pending.removeAll { $0.libraryGeneration < generation }
+    }
+
+    public mutating func replaceForRecovery(with state: PinnedReplicaState) {
+        pending = Self.canonicalized(
+            [state.reset.map(PinnedMutation.reset)].compactMap { $0 }
+                + state.primaryRevisions.map(PinnedMutation.revision)
+                + state.conflictCopies.map { PinnedMutation.revision($0.revision) }
+                + state.tombstones.map(PinnedMutation.tombstone)
+        )
     }
 
     private enum CodingKeys: String, CodingKey {

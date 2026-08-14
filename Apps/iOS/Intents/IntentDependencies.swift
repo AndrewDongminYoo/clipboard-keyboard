@@ -31,6 +31,21 @@ struct IntentReadyBackend: Sendable {
     let textTransformer: TextTransformer
     let generation: Int64
     let close: @MainActor @Sendable () async -> Void
+    let syncEngine: PhonePinnedSyncEngine?
+
+    init(
+        library: any PinnedLibrary,
+        textTransformer: TextTransformer,
+        generation: Int64,
+        close: @escaping @MainActor @Sendable () async -> Void,
+        syncEngine: PhonePinnedSyncEngine? = nil
+    ) {
+        self.library = library
+        self.textTransformer = textTransformer
+        self.generation = generation
+        self.close = close
+        self.syncEngine = syncEngine
+    }
 }
 
 struct IntentActionOutcome: Equatable, Sendable {
@@ -56,6 +71,29 @@ struct IntentRuntimeLifecycleToken: Equatable, Sendable {
     let epoch: UInt64
 }
 
+protocol PhoneSyncPreferencePersisting: Sendable {
+    func load() -> Bool
+    func save(_ enabled: Bool)
+}
+
+struct UserDefaultsPhoneSyncPreferenceStore: PhoneSyncPreferencePersisting, @unchecked Sendable {
+    let defaults: UserDefaults
+    let key: String
+
+    init(defaults: UserDefaults = .standard, key: String = "PhonePinnedSync.enabled.v1") {
+        self.defaults = defaults
+        self.key = key
+    }
+
+    func load() -> Bool {
+        defaults.bool(forKey: key)
+    }
+
+    func save(_ enabled: Bool) {
+        defaults.set(enabled, forKey: key)
+    }
+}
+
 @MainActor
 final class IntentDependencies: @unchecked Sendable {
     typealias Readiness = @MainActor @Sendable (PhoneUnlockContext) async throws -> IntentReadyBackend
@@ -72,12 +110,21 @@ final class IntentDependencies: @unchecked Sendable {
     private let readiness: Readiness
     private let pasteboardWrite: PasteboardWrite
     private let extractor: ValueExtractor
+    private let syncPreferenceStore: any PhoneSyncPreferencePersisting
+    private let beforeSyncReconciliation: @MainActor @Sendable () async -> Void
     private var readinessOperation: ReadinessOperation?
     private var readinessWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var installedClose: (@MainActor @Sendable () async -> Void)?
     private var lifecycleEpoch: UInt64 = 0
     private var protectedDataAvailable: Bool
     private(set) var isReady = false
+    private(set) var syncEngine: PhonePinnedSyncEngine?
+    private(set) var desiredSyncEnabled: Bool
+    private var syncPreferenceRevision: UInt64 = 0
+    private var syncReconciliationTask: Task<Void, Never>?
+    private var remoteContentChanged: (@MainActor @Sendable () async -> Void)?
+    private var syncStatusChanged: (@MainActor @Sendable (PhonePinnedSyncStatus) -> Void)?
+    private(set) var syncStatus: PhonePinnedSyncStatus = .disabled
 
     var readinessWaiterCount: Int {
         readinessWaiters.count
@@ -88,12 +135,17 @@ final class IntentDependencies: @unchecked Sendable {
         readiness: @escaping Readiness = IntentDependencies.prepareProductionBackend,
         extractor: ValueExtractor = ValueExtractor(),
         protectedDataAvailable: Bool = UIApplication.shared.isProtectedDataAvailable,
+        syncPreferenceStore: any PhoneSyncPreferencePersisting = UserDefaultsPhoneSyncPreferenceStore(),
+        beforeSyncReconciliation: @escaping @MainActor @Sendable () async -> Void = {},
         pasteboardWrite: @escaping PasteboardWrite = { value in try SystemPasteboardWriter().write(value) }
     ) {
         self.gate = gate
         self.readiness = readiness
         self.extractor = extractor
         self.protectedDataAvailable = protectedDataAvailable
+        self.syncPreferenceStore = syncPreferenceStore
+        self.beforeSyncReconciliation = beforeSyncReconciliation
+        desiredSyncEnabled = syncPreferenceStore.load()
         self.pasteboardWrite = pasteboardWrite
     }
 
@@ -130,6 +182,13 @@ final class IntentDependencies: @unchecked Sendable {
         readinessOperation = nil
         finishReadinessWaiters(with: .failure(ClipboardIntentError.unavailable))
         isReady = false
+        let engine = syncEngine
+        syncEngine = nil
+        syncPreferenceRevision &+= 1
+        gate.localMutationCommitted = nil
+        if let engine {
+            Task { await engine.lock() }
+        }
         gate.lock()
         let close = installedClose
         installedClose = nil
@@ -190,7 +249,26 @@ final class IntentDependencies: @unchecked Sendable {
                 throw ClipboardIntentError.unavailable
             }
             installedClose = backend.close
+            syncEngine = backend.syncEngine
+            if let syncEngine = backend.syncEngine {
+                await syncEngine.installRemoteApply { [weak self] mutation in
+                    guard let self else { throw ClipboardIntentError.unavailable }
+                    _ = try await self.gate.applyRemote(mutation)
+                    await self.remoteContentChanged?()
+                }
+                await syncEngine.installStatusObserver { [weak self] status in
+                    await self?.receiveSyncStatus(status)
+                }
+                await syncEngine.installRefreshSucceeded { [weak self] in
+                    guard let self else { throw ClipboardIntentError.unavailable }
+                    try await self.gate.markCloudRefreshSucceeded()
+                }
+            }
+            gate.localMutationCommitted = { [weak syncEngine = backend.syncEngine] in
+                await syncEngine?.localJournalDidChange()
+            }
             isReady = true
+            requestSyncReconciliation()
         }
         let operation = ReadinessOperation(id: operationID, task: task)
         readinessOperation = operation
@@ -387,6 +465,46 @@ final class IntentDependencies: @unchecked Sendable {
             lease: unlock.lease,
             deviceID: UIDevice.current.identifierForVendor?.uuidString ?? "iphone"
         )
+        let syncStateStore = PhoneSyncStateStore(
+            fileURL: directory.appendingPathComponent("CloudKit/sync-state.encrypted"),
+            key: key
+        )
+        let syncEngine = PhonePinnedSyncEngine(
+            makeTransport: { PhoneCloudKitTransport(stateStore: syncStateStore) },
+            pendingMutations: { try await store.load().pendingJournal.pending },
+            acknowledge: { ids in
+                try await store.transaction { state in
+                    var journal = state.pendingJournal
+                    journal.acknowledge(mutationIDs: ids)
+                    state = PinnedReplicaState(
+                        libraryGeneration: state.libraryGeneration,
+                        reset: state.reset,
+                        primaryRevisions: state.primaryRevisions,
+                        conflictCopies: state.conflictCopies,
+                        tombstones: state.tombstones,
+                        seenMutationIDs: state.seenMutationIDs,
+                        pendingJournal: journal
+                    )
+                }
+            },
+            applyRemote: { _ in throw ClipboardIntentError.unavailable },
+            requeueForRecovery: {
+                try await store.transaction { state in
+                    var journal = state.pendingJournal
+                    journal.replaceForRecovery(with: state)
+                    state = PinnedReplicaState(
+                        libraryGeneration: state.libraryGeneration,
+                        reset: state.reset,
+                        primaryRevisions: state.primaryRevisions,
+                        conflictCopies: state.conflictCopies,
+                        tombstones: state.tombstones,
+                        seenMutationIDs: state.seenMutationIDs,
+                        pendingJournal: journal
+                    )
+                }
+            },
+            resetSyncStateForRecovery: { try await syncStateStore.resetForRecovery() }
+        )
         try await library.reopenProtectedData()
         let state = try await store.load()
         let transformer = TextTransformer { data in
@@ -396,7 +514,76 @@ final class IntentDependencies: @unchecked Sendable {
             library: library,
             textTransformer: transformer,
             generation: state.libraryGeneration,
-            close: { await library.protectedDataWillBecomeUnavailable() }
+            close: {
+                await syncEngine.lock()
+                await library.protectedDataWillBecomeUnavailable()
+            },
+            syncEngine: syncEngine
         )
+    }
+
+    func setSyncEnabled(_ enabled: Bool) async {
+        desiredSyncEnabled = enabled
+        syncPreferenceStore.save(enabled)
+        requestSyncReconciliation()
+        guard !enabled, let syncEngine else { return }
+        try? await syncEngine.setEnabled(false)
+    }
+
+    func keepLocalAndTurnSyncOff() async {
+        desiredSyncEnabled = false
+        syncPreferenceStore.save(false)
+        syncPreferenceRevision &+= 1
+        guard let syncEngine else { return }
+        await syncEngine.keepLocalAndDisable()
+        requestSyncReconciliation()
+    }
+
+    func reuploadLocalPins() async throws {
+        guard desiredSyncEnabled, let syncEngine else { throw ClipboardIntentError.unavailable }
+        try await syncEngine.reuploadLocalPins()
+    }
+
+    private func requestSyncReconciliation() {
+        syncPreferenceRevision &+= 1
+        guard syncReconciliationTask == nil else { return }
+        syncReconciliationTask = Task { @MainActor [weak self] in
+            await self?.runSyncReconciliation()
+        }
+    }
+
+    func installRemoteContentChanged(_ handler: @escaping @MainActor @Sendable () async -> Void) {
+        remoteContentChanged = handler
+    }
+
+    func installSyncStatusChanged(_ handler: @escaping @MainActor @Sendable (PhonePinnedSyncStatus) -> Void) {
+        syncStatusChanged = handler
+        handler(syncStatus)
+    }
+
+    func refreshSync() async {
+        try? await syncEngine?.refresh()
+    }
+
+    private func receiveSyncStatus(_ status: PhonePinnedSyncStatus) {
+        syncStatus = status
+        syncStatusChanged?(status)
+    }
+
+    private func runSyncReconciliation() async {
+        while true {
+            await beforeSyncReconciliation()
+            let revision = syncPreferenceRevision
+            guard let syncEngine else {
+                syncReconciliationTask = nil
+                return
+            }
+            let enabled = desiredSyncEnabled
+            try? await syncEngine.setEnabled(enabled)
+            guard revision != syncPreferenceRevision else {
+                syncReconciliationTask = nil
+                return
+            }
+        }
     }
 }

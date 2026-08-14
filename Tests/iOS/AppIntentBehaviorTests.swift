@@ -5,6 +5,266 @@ import XCTest
 
 @MainActor
 final class AppIntentBehaviorTests: XCTestCase {
+    func testRecoveryKeepLocalPersistsDisabledPreferenceBeforeEngineAction() async throws {
+        let preferences = MemoryPhoneSyncPreferenceStore()
+        preferences.save(true)
+        let transport = IntentPhoneSyncTransport()
+        let engine = PhonePinnedSyncEngine(makeTransport: { transport })
+        let dependencies = IntentDependencies(
+            gate: PhonePinnedLibraryGate(),
+            readiness: { _ in
+                IntentReadyBackend(
+                    library: IntentLibraryFake(),
+                    textTransformer: TextTransformer { $0 },
+                    generation: 1,
+                    close: { await engine.lock() },
+                    syncEngine: engine
+                )
+            },
+            protectedDataAvailable: true,
+            syncPreferenceStore: preferences,
+            pasteboardWrite: { _ in }
+        )
+
+        try await dependencies.ensureReady()
+        await transport.waitUntilFetchCount(1)
+        await transport.emit(.accountChanged)
+
+        await dependencies.keepLocalAndTurnSyncOff()
+
+        XCTAssertFalse(preferences.load())
+        XCTAssertFalse(dependencies.desiredSyncEnabled)
+        let finalStatus = await engine.status
+        XCTAssertEqual(finalStatus, .disabled)
+        let counts = await transport.operationCounts
+        XCTAssertEqual(counts.start, 1)
+        XCTAssertEqual(counts.fetch, 1)
+        XCTAssertEqual(counts.send, 0)
+    }
+
+    func testRecoveryReuploadActionForwardsToInstalledEngineWithoutChangingPreference() async throws {
+        let preferences = MemoryPhoneSyncPreferenceStore()
+        preferences.save(true)
+        let transport = IntentPhoneSyncTransport()
+        let recovery = IntentRecoveryCallRecorder()
+        let engine = PhonePinnedSyncEngine(
+            makeTransport: { transport },
+            requeueForRecovery: { await recovery.record("requeue") },
+            resetSyncStateForRecovery: { await recovery.record("reset") }
+        )
+        let dependencies = IntentDependencies(
+            gate: PhonePinnedLibraryGate(),
+            readiness: { _ in
+                IntentReadyBackend(
+                    library: IntentLibraryFake(),
+                    textTransformer: TextTransformer { $0 },
+                    generation: 1,
+                    close: { await engine.lock() },
+                    syncEngine: engine
+                )
+            },
+            protectedDataAvailable: true,
+            syncPreferenceStore: preferences,
+            pasteboardWrite: { _ in }
+        )
+
+        try await dependencies.ensureReady()
+        await transport.waitUntilFetchCount(1)
+        await transport.emit(.accountChanged)
+
+        try await dependencies.reuploadLocalPins()
+
+        XCTAssertTrue(preferences.load())
+        XCTAssertTrue(dependencies.desiredSyncEnabled)
+        let recoveryCalls = await recovery.calls
+        let startCount = await transport.startCount
+        let fetchCount = await transport.fetchCount
+        XCTAssertEqual(recoveryCalls, ["requeue", "reset"])
+        XCTAssertEqual(startCount, 2)
+        XCTAssertEqual(fetchCount, 2)
+    }
+
+    func testDisableCancelsInFlightEnableBeforeStartCanFetchOrSend() async throws {
+        let preferences = MemoryPhoneSyncPreferenceStore()
+        preferences.save(true)
+        let startBarrier = IntentSyncReconciliationBarrier()
+        let cancelled = expectation(description: "in-flight enable cancelled")
+        let cancelSignal = IntentOneShotCallback { cancelled.fulfill() }
+        let transport = IntentPhoneSyncTransport(
+            startBarrier: startBarrier,
+            onCancel: { cancelSignal.call() }
+        )
+        let engine = PhonePinnedSyncEngine(makeTransport: { transport })
+        let dependencies = IntentDependencies(
+            gate: PhonePinnedLibraryGate(),
+            readiness: { _ in
+                IntentReadyBackend(
+                    library: IntentLibraryFake(),
+                    textTransformer: TextTransformer { $0 },
+                    generation: 1,
+                    close: { await engine.lock() },
+                    syncEngine: engine
+                )
+            },
+            protectedDataAvailable: true,
+            syncPreferenceStore: preferences,
+            pasteboardWrite: { _ in }
+        )
+
+        try await dependencies.ensureReady()
+        await startBarrier.waitUntilEntered()
+        let disable = Task { await dependencies.setSyncEnabled(false) }
+        await fulfillment(of: [cancelled], timeout: 1)
+
+        let countsBeforeRelease = await transport.operationCounts
+        XCTAssertEqual(countsBeforeRelease.start, 1)
+        XCTAssertEqual(countsBeforeRelease.fetch, 0)
+        XCTAssertEqual(countsBeforeRelease.send, 0)
+        let statusBeforeRelease = await engine.status
+        XCTAssertEqual(statusBeforeRelease, .disabled)
+
+        await startBarrier.release()
+        await disable.value
+        await Task.yield()
+        let finalCounts = await transport.operationCounts
+        XCTAssertEqual(finalCounts.fetch, 0)
+        XCTAssertEqual(finalCounts.send, 0)
+        let finalStatus = await engine.status
+        XCTAssertEqual(finalStatus, .disabled)
+        XCTAssertFalse(dependencies.desiredSyncEnabled)
+    }
+
+    func testReadinessReplayReadsLatestDisabledPreferenceBeforeAnyEngineAction() async throws {
+        let preferences = MemoryPhoneSyncPreferenceStore()
+        preferences.save(true)
+        let reconciliationBarrier = IntentSyncReconciliationBarrier()
+        let transport = IntentPhoneSyncTransport()
+        let engine = PhonePinnedSyncEngine(makeTransport: { transport })
+        let dependencies = IntentDependencies(
+            gate: PhonePinnedLibraryGate(),
+            readiness: { _ in
+                IntentReadyBackend(
+                    library: IntentLibraryFake(),
+                    textTransformer: TextTransformer { $0 },
+                    generation: 1,
+                    close: { await engine.lock() },
+                    syncEngine: engine
+                )
+            },
+            protectedDataAvailable: true,
+            syncPreferenceStore: preferences,
+            beforeSyncReconciliation: { await reconciliationBarrier.suspendOnce() },
+            pasteboardWrite: { _ in }
+        )
+        var observedStatuses: [PhonePinnedSyncStatus] = []
+        let reconciled = expectation(description: "latest sync preference reconciled")
+        dependencies.installSyncStatusChanged {
+            observedStatuses.append($0)
+            if observedStatuses.count == 3 {
+                reconciled.fulfill()
+            }
+        }
+
+        try await dependencies.ensureReady()
+        await reconciliationBarrier.waitUntilEntered()
+        await dependencies.setSyncEnabled(false)
+        await reconciliationBarrier.release()
+        await fulfillment(of: [reconciled], timeout: 1)
+
+        XCTAssertGreaterThanOrEqual(observedStatuses.count, 3)
+        let counts = await transport.operationCounts
+        XCTAssertEqual(counts.start, 0)
+        XCTAssertEqual(counts.fetch, 0)
+        XCTAssertEqual(counts.send, 0)
+        XCTAssertFalse(dependencies.desiredSyncEnabled)
+        XCTAssertFalse(preferences.load())
+        let finalStatus = await engine.status
+        XCTAssertEqual(finalStatus, .disabled)
+    }
+
+    func testFetchedRemoteMutationRoutesThroughInstalledGateWithoutOutgoingSend() async throws {
+        let preferences = MemoryPhoneSyncPreferenceStore()
+        preferences.save(true)
+        let transport = IntentPhoneSyncTransport()
+        let engine = PhonePinnedSyncEngine(makeTransport: { transport })
+        let library = IntentLibraryFake()
+        let dependencies = IntentDependencies(
+            gate: PhonePinnedLibraryGate(),
+            readiness: { _ in
+                IntentReadyBackend(
+                    library: library,
+                    textTransformer: TextTransformer { $0 },
+                    generation: 1,
+                    close: { await engine.lock() },
+                    syncEngine: engine
+                )
+            },
+            protectedDataAvailable: true,
+            syncPreferenceStore: preferences,
+            pasteboardWrite: { _ in }
+        )
+        let remote = revision(index: 77, text: "remote-content")
+
+        try await dependencies.ensureReady()
+        await transport.waitUntilFetchCount(1)
+        await transport.emit(.fetched(.revision(remote)))
+
+        let items = try await dependencies.gate.allItems()
+        let sendCount = await transport.sendCount
+        XCTAssertEqual(items.map(\.itemID), [remote.itemID])
+        XCTAssertEqual(sendCount, 0)
+    }
+
+    func testSyncPreferencePersistsBeforeReadinessAndReplaysAfterLockAndRecreation() async throws {
+        let preferences = MemoryPhoneSyncPreferenceStore()
+        let transport = IntentPhoneSyncTransport()
+        let engine = PhonePinnedSyncEngine(makeTransport: { transport })
+        let library = IntentLibraryFake()
+        let dependencies = IntentDependencies(
+            gate: PhonePinnedLibraryGate(),
+            readiness: { _ in
+                IntentReadyBackend(
+                    library: library,
+                    textTransformer: TextTransformer { $0 },
+                    generation: 1,
+                    close: { await engine.lock() },
+                    syncEngine: engine
+                )
+            },
+            protectedDataAvailable: true,
+            syncPreferenceStore: preferences,
+            pasteboardWrite: { _ in }
+        )
+
+        await dependencies.setSyncEnabled(true)
+        await dependencies.setSyncEnabled(false)
+        await dependencies.setSyncEnabled(true)
+        XCTAssertTrue(dependencies.desiredSyncEnabled)
+        XCTAssertTrue(preferences.load())
+        let startsBeforeReadiness = await transport.startCount
+        XCTAssertEqual(startsBeforeReadiness, 0)
+
+        try await dependencies.ensureReady()
+        await transport.waitUntilStartCount(1)
+        await transport.waitUntilFetchCount(1)
+        let fetchCount = await transport.fetchCount
+        XCTAssertEqual(fetchCount, 1)
+
+        dependencies.lock()
+        _ = dependencies.protectedDataDidBecomeAvailable()
+        try await dependencies.ensureReady()
+        await transport.waitUntilStartCount(2)
+
+        let recreated = IntentDependencies(
+            gate: PhonePinnedLibraryGate(),
+            readiness: { _ in throw IntentTestError.backendSecret },
+            protectedDataAvailable: false,
+            syncPreferenceStore: preferences,
+            pasteboardWrite: { _ in }
+        )
+        XCTAssertTrue(recreated.desiredSyncEnabled)
+    }
+
     func testConcurrentColdCallsPrepareProtectedLibraryOnce() async throws {
         let library = IntentLibraryFake()
         let readiness = ReadinessHarness(library: library, suspended: true)
@@ -449,6 +709,124 @@ final class AppIntentBehaviorTests: XCTestCase {
     }
 }
 
+private final class MemoryPhoneSyncPreferenceStore: PhoneSyncPreferencePersisting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func load() -> Bool {
+        lock.withLock { value }
+    }
+
+    func save(_ enabled: Bool) {
+        lock.withLock { value = enabled }
+    }
+}
+
+private actor IntentRecoveryCallRecorder {
+    private(set) var calls: [String] = []
+
+    func record(_ call: String) {
+        calls.append(call)
+    }
+}
+
+private final class IntentOneShotCallback: @unchecked Sendable {
+    private let lock = NSLock()
+    private var callback: (() -> Void)?
+
+    init(_ callback: @escaping () -> Void) {
+        self.callback = callback
+    }
+
+    func call() {
+        let callback = lock.withLock {
+            defer { self.callback = nil }
+            return self.callback
+        }
+        callback?()
+    }
+}
+
+private actor IntentPhoneSyncTransport: PhonePinnedSyncTransport {
+    private let startBarrier: IntentSyncReconciliationBarrier?
+    private let onCancel: @Sendable () -> Void
+    private(set) var startCount = 0
+    private(set) var fetchCount = 0
+    private(set) var sendCount = 0
+    private var handler: (@Sendable (PhonePinnedSyncEvent) async -> Void)?
+    var operationCounts: (start: Int, fetch: Int, send: Int) {
+        (startCount, fetchCount, sendCount)
+    }
+
+    init(
+        startBarrier: IntentSyncReconciliationBarrier? = nil,
+        onCancel: @escaping @Sendable () -> Void = {}
+    ) {
+        self.startBarrier = startBarrier
+        self.onCancel = onCancel
+    }
+
+    func start(eventHandler: @escaping @Sendable (PhonePinnedSyncEvent) async -> Void) async throws {
+        startCount += 1
+        handler = eventHandler
+        await startBarrier?.suspendOnce()
+    }
+
+    func fetch() async throws {
+        fetchCount += 1
+    }
+
+    func send(_: [PinnedMutation]) async throws {
+        sendCount += 1
+    }
+
+    func cancel() async {
+        onCancel()
+    }
+
+    func waitUntilStartCount(_ expected: Int) async {
+        while startCount < expected {
+            await Task.yield()
+        }
+    }
+
+    func waitUntilFetchCount(_ expected: Int) async {
+        while fetchCount < expected {
+            await Task.yield()
+        }
+    }
+
+    func emit(_ event: PhonePinnedSyncEvent) async {
+        await handler?(event)
+    }
+}
+
+private actor IntentSyncReconciliationBarrier {
+    private var entered = false
+    private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func suspendOnce() async {
+        guard !entered else { return }
+        entered = true
+        let waiters = enteredWaiters
+        enteredWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+        await withCheckedContinuation { releaseContinuation = $0 }
+    }
+
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { enteredWaiters.append($0) }
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
 @MainActor
 private final class ReadinessHarness {
     private let libraries: [IntentLibraryFake]
@@ -678,8 +1056,17 @@ private actor IntentLibraryFake: PinnedLibrary, IntentPinCommittingLibrary {
         throw IntentTestError.backendSecret
     }
 
-    func applyRemote(_: PinnedMutation) async throws -> MergeOutcome {
-        throw IntentTestError.backendSecret
+    func applyRemote(_ mutation: PinnedMutation) async throws -> MergeOutcome {
+        switch mutation {
+        case let .revision(revision):
+            items.removeAll { $0.itemID == revision.itemID }
+            items.append(revision)
+        case let .tombstone(tombstone):
+            items.removeAll { $0.itemID == tombstone.itemID }
+        case .reset:
+            items.removeAll()
+        }
+        return .inserted(mutation.mutationID)
     }
 
     func advanceResetGeneration() async throws -> LibraryResetGeneration {

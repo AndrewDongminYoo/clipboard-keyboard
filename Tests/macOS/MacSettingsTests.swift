@@ -5,6 +5,76 @@ import XCTest
 
 @MainActor
 final class MacSettingsTests: XCTestCase {
+    func testRecoveryActionsPersistOffBeforeKeepLocalAndForwardConfirmedReupload() async throws {
+        let store = MemoryMacSettingsStore()
+        let settings = MacSettingsModel(store: store)
+        settings.syncEnabled = true
+        var keepObservedPersistedOff = false
+        var reuploadCount = 0
+        settings.keepLocalRecoveryRequested = {
+            keepObservedPersistedOff = (try? store.load()?.syncEnabled) == false
+        }
+        settings.reuploadRecoveryRequested = { reuploadCount += 1 }
+
+        try await settings.reuploadLocalPins()
+        await settings.keepLocalAndTurnSyncOff()
+
+        XCTAssertFalse(settings.syncEnabled)
+        XCTAssertTrue(keepObservedPersistedOff)
+        XCTAssertEqual(reuploadCount, 1)
+    }
+
+    func testDisableInterruptsInFlightEnableAndRemainsLatestAfterEnableReturns() async throws {
+        let enableBarrier = MacSyncReconciliationBarrier()
+        let recorder = MacSyncEnabledRecorder()
+        let disabled = expectation(description: "in-flight enable interrupted by disable")
+        let disableSignal = MacOneShotCallback { disabled.fulfill() }
+        let harness = try MacAppHarness(
+            retention: .init(maxAgeHours: 24, maxItemCount: 10, historyEnabled: true),
+            setSyncEnabled: { enabled in
+                await recorder.record(enabled)
+                if enabled {
+                    await enableBarrier.suspend()
+                } else {
+                    disableSignal.call()
+                }
+            }
+        )
+
+        harness.settings.syncEnabled = true
+        await enableBarrier.waitUntilEntered()
+        harness.settings.syncEnabled = false
+        await fulfillment(of: [disabled], timeout: 1)
+
+        let valuesBeforeRelease = await recorder.values
+        XCTAssertEqual(valuesBeforeRelease, [true, false])
+
+        await enableBarrier.release()
+        await recorder.waitForCount(3)
+        let finalValues = await recorder.values
+        XCTAssertEqual(finalValues, [true, false, false])
+        XCTAssertFalse(harness.settings.syncEnabled)
+    }
+
+    func testRapidSyncEnableThenDisableReconcilesOnlyLatestValue() async throws {
+        let barrier = MacSyncReconciliationBarrier()
+        let recorder = MacSyncEnabledRecorder()
+        let harness = try MacAppHarness(
+            retention: .init(maxAgeHours: 24, maxItemCount: 10, historyEnabled: true),
+            setSyncEnabled: { await recorder.record($0) },
+            beforeSyncReconciliation: { await barrier.suspend() }
+        )
+
+        harness.settings.syncEnabled = true
+        await barrier.waitUntilEntered()
+        harness.settings.syncEnabled = false
+        await barrier.release()
+        await recorder.waitForCount(2)
+
+        let reconciledValues = await recorder.values
+        XCTAssertEqual(reconciledValues, [false, false])
+    }
+
     func testPrivacyAndSyncDefaultsAreOffAndRetentionIsBounded() {
         let settings = MacSettingsModel(store: MemoryMacSettingsStore())
 
@@ -40,6 +110,19 @@ final class MacSettingsTests: XCTestCase {
         settings.deletionPending = true
         XCTAssertEqual(settings.capturePauseSecondsRemaining, 0)
         XCTAssertEqual(settings.statusLabels, ["Protected Storage Locked", "Sync Pending", "Deletion Pending"])
+    }
+
+    func testContentFreeCloudStatusLabelsCoverFailureStates() {
+        let settings = MacSettingsModel(store: MemoryMacSettingsStore())
+
+        settings.syncStatus = .pending
+        XCTAssertTrue(settings.statusLabels.contains("Sync Pending"))
+        settings.syncStatus = .unableToSyncFullItem
+        XCTAssertTrue(settings.statusLabels.contains("Unable to Sync Full Item"))
+        settings.syncStatus = .accountUnavailable
+        XCTAssertTrue(settings.statusLabels.contains("Account Unavailable"))
+        settings.syncStatus = .recoveryRequired
+        XCTAssertTrue(settings.statusLabels.contains("Recovery Required"))
     }
 
     func testShortcutConflictDisplaysWithoutReplacingRegistration() {
@@ -234,17 +317,27 @@ private final class MacAppHarness {
     convenience init(
         retention: MacRetentionSettings,
         identity: ApplicationIdentity? = nil,
-        registrarResults: [GlobalShortcutRegistrationResult] = [.success]
+        registrarResults: [GlobalShortcutRegistrationResult] = [.success],
+        setSyncEnabled: @escaping @Sendable (Bool) async -> Void = { _ in },
+        beforeSyncReconciliation: @escaping @MainActor @Sendable () async -> Void = {}
     ) throws {
         let settings = MacSettingsModel(store: MemoryMacSettingsStore())
         try settings.updateRetention(maxAgeHours: retention.maxAgeHours, maxItemCount: retention.maxItemCount, historyEnabled: retention.historyEnabled)
-        try self.init(settings: settings, identity: identity, registrarResults: registrarResults)
+        try self.init(
+            settings: settings,
+            identity: identity,
+            registrarResults: registrarResults,
+            setSyncEnabled: setSyncEnabled,
+            beforeSyncReconciliation: beforeSyncReconciliation
+        )
     }
 
     init(
         settings: MacSettingsModel,
         identity: ApplicationIdentity? = nil,
-        registrarResults: [GlobalShortcutRegistrationResult]
+        registrarResults: [GlobalShortcutRegistrationResult],
+        setSyncEnabled: @escaping @Sendable (Bool) async -> Void = { _ in },
+        beforeSyncReconciliation: @escaping @MainActor @Sendable () async -> Void = {}
     ) throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         self.settings = settings
@@ -273,11 +366,71 @@ private final class MacAppHarness {
             watcher: watcher,
             capturePasteboard: pasteboard,
             sourceTracker: source,
-            now: Date.init
+            now: Date.init,
+            setSyncEnabled: setSyncEnabled,
+            beforeSyncReconciliation: beforeSyncReconciliation
         )
     }
 
     deinit { try? FileManager.default.removeItem(at: root) }
+}
+
+private actor MacSyncEnabledRecorder {
+    private(set) var values: [Bool] = []
+
+    func record(_ enabled: Bool) {
+        values.append(enabled)
+    }
+
+    func waitForCount(_ count: Int) async {
+        while values.count < count {
+            await Task.yield()
+        }
+    }
+}
+
+private final class MacOneShotCallback: @unchecked Sendable {
+    private let lock = NSLock()
+    private var callback: (() -> Void)?
+
+    init(_ callback: @escaping () -> Void) {
+        self.callback = callback
+    }
+
+    func call() {
+        let callback = lock.withLock {
+            defer { self.callback = nil }
+            return self.callback
+        }
+        callback?()
+    }
+}
+
+private actor MacSyncReconciliationBarrier {
+    private var entered = false
+    private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func suspend() async {
+        guard !entered else { return }
+        entered = true
+        let waiters = enteredWaiters
+        enteredWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+        await withCheckedContinuation { releaseContinuation = $0 }
+    }
+
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { enteredWaiters.append($0) }
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
 }
 
 @MainActor

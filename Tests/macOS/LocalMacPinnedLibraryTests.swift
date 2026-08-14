@@ -101,6 +101,30 @@ final class LocalMacPinnedLibraryTests: XCTestCase {
         XCTAssertEqual(state.pendingJournal.pending.last?.mutationID, reset.resetID)
     }
 
+    func testEveryDurableLocalMutationNotifiesAfterJournalPersistence() async throws {
+        let fileURL = temporaryFileURL()
+        defer { try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent()) }
+        let store = EncryptedMacPinnedStore(fileURL: fileURL, key: SymmetricKey(data: Data(repeating: 6, count: 32)))
+        let observations = MutationObservationBox()
+        let library = LocalMacPinnedLibrary(
+            store: store,
+            deviceID: "notify-test",
+            notifier: {
+                if let state = try? await store.load() {
+                    await observations.append(state.pendingJournal.pending.count)
+                }
+            }
+        )
+
+        let pinned = try await library.pin(payload(text: "one", title: "One"))
+        _ = try await library.revise(itemID: pinned.itemID, payload: payload(text: "two", title: "Two"))
+        _ = try await library.delete(itemID: pinned.itemID)
+        _ = try await library.advanceResetGeneration()
+
+        let counts = await observations.counts
+        XCTAssertEqual(counts, [1, 2, 3, 1])
+    }
+
     private func payload(text: String, title: String) -> PinPayload {
         PinPayload(
             representations: [.init(kind: .plainText, originalBytes: Data(text.utf8), keyedDigest: Data([1]))],
@@ -115,5 +139,13 @@ final class LocalMacPinnedLibraryTests: XCTestCase {
         FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent("pinned-replica.encrypted")
+    }
+}
+
+private actor MutationObservationBox {
+    private(set) var counts: [Int] = []
+
+    func append(_ count: Int) {
+        counts.append(count)
     }
 }

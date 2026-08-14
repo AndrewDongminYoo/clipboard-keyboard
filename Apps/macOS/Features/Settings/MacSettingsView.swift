@@ -101,13 +101,15 @@ final class MacSettingsModel: ObservableObject {
     }
 
     @Published var syncEnabled = false {
-        didSet { persist() }
+        didSet { persist(); syncEnabledChanged?(syncEnabled) }
     }
 
     @Published private(set) var retention = MacRetentionSettings(maxAgeHours: 24, maxItemCount: 200, historyEnabled: true)
     @Published private(set) var ignoredApplications: [IgnoredApplicationDisplay] = []
     @Published var protectedStorageLocked = false
     @Published var syncPending = false
+    @Published var syncStatus: MacPinnedSyncStatus = .disabled
+    @Published private(set) var recoveryActionInProgress = false
     @Published var deletionPending = false
     @Published var launchAtLogin = false
     @Published private(set) var paletteShortcut = GlobalShortcutDefinition.defaultPalette
@@ -122,6 +124,9 @@ final class MacSettingsModel: ObservableObject {
     var capturePauseChanged: ((TimeInterval?) -> Void)?
     var ignoredApplicationsChanged: (() -> Void)?
     var shortcutConflict: (() -> Void)?
+    var syncEnabledChanged: ((Bool) -> Void)?
+    var keepLocalRecoveryRequested: (() async -> Void)?
+    var reuploadRecoveryRequested: (() async throws -> Void)?
 
     init(
         store: any MacSettingsPersisting = UserDefaultsMacSettingsStore(),
@@ -170,6 +175,18 @@ final class MacSettingsModel: ObservableObject {
         if syncPending {
             labels.append("Sync Pending")
         }
+        switch syncStatus {
+        case .pending where !labels.contains("Sync Pending"):
+            labels.append("Sync Pending")
+        case .unableToSyncFullItem:
+            labels.append("Unable to Sync Full Item")
+        case .accountUnavailable:
+            labels.append("Account Unavailable")
+        case .recoveryRequired:
+            labels.append("Recovery Required")
+        case .disabled, .pending, .synced:
+            break
+        }
         if deletionPending {
             labels.append("Deletion Pending")
         }
@@ -201,6 +218,21 @@ final class MacSettingsModel: ObservableObject {
         pauseCountdownTick = 0
         ticker.cancel()
         capturePauseChanged?(nil)
+    }
+
+    func keepLocalAndTurnSyncOff() async {
+        guard !recoveryActionInProgress else { return }
+        recoveryActionInProgress = true
+        syncEnabled = false
+        await keepLocalRecoveryRequested?()
+        recoveryActionInProgress = false
+    }
+
+    func reuploadLocalPins() async throws {
+        guard syncEnabled, !recoveryActionInProgress else { return }
+        recoveryActionInProgress = true
+        defer { recoveryActionInProgress = false }
+        try await reuploadRecoveryRequested?()
     }
 
     func addIgnoredApplication(_ identity: ApplicationIdentity, displayName: String) {
@@ -261,6 +293,7 @@ struct MacSettingsView: View {
     @ObservedObject var model: MacSettingsModel
     @ObservedObject var shortcut: GlobalPaletteShortcut
     @ObservedObject var fallback: PrivateCopyFallbackState
+    @State private var recoveryConfirmationPresented = false
 
     var body: some View {
         Form {
@@ -269,6 +302,20 @@ struct MacSettingsView: View {
             }
             Toggle("Enable Automatic Capture", isOn: $model.captureConsentGranted)
             Toggle("Enable Pinned Sync", isOn: $model.syncEnabled)
+            if model.syncStatus == .recoveryRequired {
+                Section("Sync Recovery") {
+                    Text("Cloud account or encrypted sync state changed. Choose how to continue; local pins remain on this Mac until you decide.")
+                        .foregroundStyle(.secondary)
+                    Button("Keep Local and Turn Sync Off") {
+                        Task { await model.keepLocalAndTurnSyncOff() }
+                    }
+                    .disabled(model.recoveryActionInProgress)
+                    Button("Re-upload Local Pins") {
+                        recoveryConfirmationPresented = true
+                    }
+                    .disabled(model.recoveryActionInProgress)
+                }
+            }
             Toggle("Launch at Login", isOn: Binding(
                 get: { model.launchAtLogin },
                 set: { try? model.setLaunchAtLogin($0) }
@@ -324,6 +371,18 @@ struct MacSettingsView: View {
         }
         .padding()
         .frame(minWidth: 460, minHeight: 420)
+        .confirmationDialog(
+            "Re-upload local pins?",
+            isPresented: $recoveryConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button("Re-upload Local Pins") {
+                Task { try? await model.reuploadLocalPins() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This replaces the local outgoing queue and starts a new sync session. It does not delete remote records.")
+        }
     }
 }
 

@@ -33,6 +33,7 @@ targets:
       - Apps/macOS
     settings:
       base:
+        CODE_SIGN_ENTITLEMENTS: Apps/macOS/ClipboardKeyboardMac.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: kr.donminzzi.clipboardkeyboard.mac
     info:
       path: ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardMac-Info.plist
@@ -87,6 +88,8 @@ targets:
                 - md
                 - markdown
               public.mime-type: text/markdown
+        UIBackgroundModes:
+          - remote-notification
 
   ClipboardKeyboardKeyboard:
     templates:
