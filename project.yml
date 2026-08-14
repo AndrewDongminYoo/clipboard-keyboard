@@ -33,7 +33,7 @@ targets:
       - Apps/macOS
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.andrewdongminyoo.clipboardkeyboard.mac
+        PRODUCT_BUNDLE_IDENTIFIER: kr.donminzzi.clipboardkeyboard.mac
     info:
       path: ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardMac-Info.plist
       properties:
@@ -66,7 +66,7 @@ targets:
       - Apps/iOS
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.andrewdongminyoo.clipboardkeyboard.ios
+        PRODUCT_BUNDLE_IDENTIFIER: kr.donminzzi.clipboardkeyboard.ios
     dependencies:
       - target: ClipboardKeyboardKeyboard
         embed: true
@@ -86,7 +86,7 @@ targets:
       - Extensions/Keyboard
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.andrewdongminyoo.clipboardkeyboard.ios.keyboard
+        PRODUCT_BUNDLE_IDENTIFIER: kr.donminzzi.clipboardkeyboard.ios.keyboard
     info:
       path: ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardKeyboard-Info.plist
       properties:
@@ -106,7 +106,7 @@ targets:
       - Extensions/Share
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.andrewdongminyoo.clipboardkeyboard.ios.share
+        PRODUCT_BUNDLE_IDENTIFIER: kr.donminzzi.clipboardkeyboard.ios.share
     info:
       path: ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardShare-Info.plist
       properties:

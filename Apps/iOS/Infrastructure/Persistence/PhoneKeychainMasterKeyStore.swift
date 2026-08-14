@@ -32,7 +32,7 @@ struct PhoneKeychainOperations: @unchecked Sendable {
 
 struct PhoneKeychainMasterKeyStore: PhoneMasterKeyProviding {
     private static let keyByteCount = 32
-    private static let service = "com.andrewdongminyoo.clipboardkeyboard.master-key.ios"
+    private static let service = "kr.donminzzi.clipboardkeyboard.master-key.ios"
     private let operations: PhoneKeychainOperations
 
     init(operations: PhoneKeychainOperations = .live) {

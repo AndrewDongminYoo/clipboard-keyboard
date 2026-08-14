@@ -74,7 +74,7 @@ public struct CapturePolicy: Hashable, Codable, Sendable {
         Self(
             consentGranted: consentGranted,
             ignoredApplications: ignoredApplications,
-            privateCopyMarkerTypeIdentifier: "com.andrewdongminyoo.clipboardkeyboard.private-copy",
+            privateCopyMarkerTypeIdentifier: "kr.donminzzi.clipboardkeyboard.private-copy",
             confidentialTypeIdentifiers: [
                 "com.agilebits.onepassword",
                 "org.nspasteboard.ConcealedType",

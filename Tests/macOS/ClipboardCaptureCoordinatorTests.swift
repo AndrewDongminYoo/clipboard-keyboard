@@ -13,7 +13,7 @@ final class ClipboardCaptureCoordinatorTests: XCTestCase {
     func testBlockedMetadataNeverReadsPayloadOrDerivesOrCommits() async {
         let ignoredIdentity = ApplicationIdentity(bundleIdentifier: "com.example.Ignored", teamIdentifier: "TEAM123", signingIdentifier: "com.example.Ignored")
         let cases: [(String, [String], SourceObservation, Set<ApplicationIdentity>, TimeInterval?)] = [
-            ("private copy", ["public.utf8-plain-text", "com.andrewdongminyoo.clipboardkeyboard.private-copy"], stableSource(), [], nil),
+            ("private copy", ["public.utf8-plain-text", "kr.donminzzi.clipboardkeyboard.private-copy"], stableSource(), [], nil),
             ("confidential", ["public.utf8-plain-text", "com.agilebits.onepassword"], stableSource(), [], nil),
             ("paused", ["public.utf8-plain-text"], stableSource(), [], 60),
             ("unknown source", ["public.utf8-plain-text"], .init(identity: nil, confidence: .unknown), [], nil),
@@ -161,7 +161,7 @@ final class ClipboardCaptureCoordinatorTests: XCTestCase {
             ("stable allowed without override", stableSource(), [], false, ["public.utf8-plain-text"], true),
             ("paused", .init(identity: nil, confidence: .unknown), [], true, ["public.utf8-plain-text"], false),
             ("ignored verified identity", .init(identity: ignored, confidence: .inferredStableForeground), [ignored], false, ["public.utf8-plain-text"], false),
-            ("private copy", .init(identity: nil, confidence: .unknown), [], false, ["public.utf8-plain-text", "com.andrewdongminyoo.clipboardkeyboard.private-copy"], false),
+            ("private copy", .init(identity: nil, confidence: .unknown), [], false, ["public.utf8-plain-text", "kr.donminzzi.clipboardkeyboard.private-copy"], false),
             ("confidential", .init(identity: nil, confidence: .unknown), [], false, ["public.utf8-plain-text", "com.agilebits.onepassword"], false),
             ("unsupported", .init(identity: nil, confidence: .unknown), [], false, ["public.png"], false),
         ]

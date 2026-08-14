@@ -54,7 +54,7 @@ struct KeychainOperations: @unchecked Sendable {
 
 struct MacKeychainMasterKeyStore: MasterKeyProviding {
     private static let keyByteCount = 32
-    private static let service = "com.andrewdongminyoo.clipboardkeyboard.master-key.mac"
+    private static let service = "kr.donminzzi.clipboardkeyboard.master-key.mac"
     private let operations: KeychainOperations
 
     init(operations: KeychainOperations = .live) {

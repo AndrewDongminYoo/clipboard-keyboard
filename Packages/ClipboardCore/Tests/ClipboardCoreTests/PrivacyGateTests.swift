@@ -34,7 +34,7 @@ final class PrivacyGateTests: XCTestCase {
                 "Private Copy marker",
                 metadata(
                     changeCount: 2,
-                    types: ["public.utf8-plain-text", "com.andrewdongminyoo.clipboardkeyboard.private-copy"],
+                    types: ["public.utf8-plain-text", "kr.donminzzi.clipboardkeyboard.private-copy"],
                     source: stableSource
                 ),
                 policy,

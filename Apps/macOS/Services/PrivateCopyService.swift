@@ -56,7 +56,7 @@ final class PrivateCopyFallbackState: ObservableObject {
 final class PrivateCopyService: NSObject {
     typealias ShieldPresentationScheduler = (@escaping @MainActor () -> Void) -> Void
 
-    static let markerTypeIdentifier = "com.andrewdongminyoo.clipboardkeyboard.private-copy"
+    static let markerTypeIdentifier = "kr.donminzzi.clipboardkeyboard.private-copy"
 
     private let destination: any MacPasteboardReading
     private let shieldPresenter: any PrivateCopyShieldPresenting

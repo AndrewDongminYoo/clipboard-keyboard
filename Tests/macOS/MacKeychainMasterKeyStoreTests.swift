@@ -56,7 +56,7 @@ final class MacKeychainMasterKeyStoreTests: XCTestCase {
 
     private func assertCopyQuery(_ query: [String: Any]) throws {
         XCTAssertEqual(query[kSecClass as String] as? String, kSecClassGenericPassword as String)
-        XCTAssertEqual(query[kSecAttrService as String] as? String, "com.andrewdongminyoo.clipboardkeyboard.master-key.mac")
+        XCTAssertEqual(query[kSecAttrService as String] as? String, "kr.donminzzi.clipboardkeyboard.master-key.mac")
         XCTAssertEqual(query[kSecAttrAccount as String] as? String, "master-key")
         XCTAssertEqual(query[kSecUseDataProtectionKeychain as String] as? Bool, true)
         XCTAssertEqual(query[kSecReturnData as String] as? Bool, true)
@@ -65,7 +65,7 @@ final class MacKeychainMasterKeyStoreTests: XCTestCase {
 
     private func assertAddAttributes(_ attributes: [String: Any], expectedValue: Data) throws {
         XCTAssertEqual(attributes[kSecClass as String] as? String, kSecClassGenericPassword as String)
-        XCTAssertEqual(attributes[kSecAttrService as String] as? String, "com.andrewdongminyoo.clipboardkeyboard.master-key.mac")
+        XCTAssertEqual(attributes[kSecAttrService as String] as? String, "kr.donminzzi.clipboardkeyboard.master-key.mac")
         XCTAssertEqual(attributes[kSecAttrAccount as String] as? String, "master-key")
         XCTAssertEqual(attributes[kSecUseDataProtectionKeychain as String] as? Bool, true)
         XCTAssertEqual(attributes[kSecAttrAccessible as String] as? String, kSecAttrAccessibleWhenUnlocked as String)

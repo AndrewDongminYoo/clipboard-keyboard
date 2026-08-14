@@ -274,7 +274,7 @@ final class EncryptedPhonePinnedStoreTests: XCTestCase {
         XCTAssertEqual(try store.loadOrCreateKey().bytes, Data(repeating: 8, count: 32))
         XCTAssertEqual(fake.randomByteCount, 32)
         XCTAssertEqual(fake.copyQueries.count, 2)
-        XCTAssertEqual(fake.addedAttributes?[kSecAttrService as String] as? String, "com.andrewdongminyoo.clipboardkeyboard.master-key.ios")
+        XCTAssertEqual(fake.addedAttributes?[kSecAttrService as String] as? String, "kr.donminzzi.clipboardkeyboard.master-key.ios")
         XCTAssertEqual(fake.addedAttributes?[kSecAttrAccessible as String] as? String, kSecAttrAccessibleWhenUnlocked as String)
         XCTAssertEqual(fake.addedAttributes?[kSecUseDataProtectionKeychain as String] as? Bool, true)
         XCTAssertEqual(fake.addedAttributes?[kSecClass as String] as? String, kSecClassGenericPassword as String)
@@ -282,7 +282,7 @@ final class EncryptedPhonePinnedStoreTests: XCTestCase {
         XCTAssertEqual((fake.addedAttributes?[kSecValueData as String] as? Data)?.count, 32)
         for query in fake.copyQueries {
             XCTAssertEqual(query[kSecClass as String] as? String, kSecClassGenericPassword as String)
-            XCTAssertEqual(query[kSecAttrService as String] as? String, "com.andrewdongminyoo.clipboardkeyboard.master-key.ios")
+            XCTAssertEqual(query[kSecAttrService as String] as? String, "kr.donminzzi.clipboardkeyboard.master-key.ios")
             XCTAssertEqual(query[kSecAttrAccount as String] as? String, "master-key")
             XCTAssertEqual(query[kSecUseDataProtectionKeychain as String] as? Bool, true)
             XCTAssertEqual(query[kSecReturnData as String] as? Bool, true)
