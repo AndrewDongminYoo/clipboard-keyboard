@@ -54,18 +54,27 @@ final class PrivateCopyFallbackState: ObservableObject {
 
 @MainActor
 final class PrivateCopyService: NSObject {
+    typealias ShieldPresentationScheduler = (@escaping @MainActor () -> Void) -> Void
+
     static let markerTypeIdentifier = "com.andrewdongminyoo.clipboardkeyboard.private-copy"
 
     private let destination: any MacPasteboardReading
     private let shieldPresenter: any PrivateCopyShieldPresenting
+    private let scheduleShieldPresentation: ShieldPresentationScheduler
     var failureHandler: (@MainActor () -> Void)?
 
     init(
         destination: any MacPasteboardReading = MacPasteboardClient(),
-        shieldPresenter: any PrivateCopyShieldPresenting = MacPrivateCopyShieldPresenter()
+        shieldPresenter: any PrivateCopyShieldPresenting = MacPrivateCopyShieldPresenter(),
+        scheduleShieldPresentation: @escaping ShieldPresentationScheduler = { presentation in
+            Task { @MainActor in
+                presentation()
+            }
+        }
     ) {
         self.destination = destination
         self.shieldPresenter = shieldPresenter
+        self.scheduleShieldPresentation = scheduleShieldPresentation
     }
 
     func performPrivateCopy(from source: any MacPasteboardReading) throws {
@@ -73,7 +82,9 @@ final class PrivateCopyService: NSObject {
             let metadata = source.readMetadata()
             let representations = try source.readSupportedRepresentations(for: metadata.changeCount)
             try destination.writeRepresentations(representations, marker: Self.markerTypeIdentifier)
-            shieldPresenter.showPrivateCopySucceeded()
+            scheduleShieldPresentation { [shieldPresenter] in
+                shieldPresenter.showPrivateCopySucceeded()
+            }
         } catch {
             failureHandler?()
             throw error

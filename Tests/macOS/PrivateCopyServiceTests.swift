@@ -4,36 +4,52 @@ import XCTest
 
 @MainActor
 final class PrivateCopyServiceTests: XCTestCase {
-    func testSuccessfulTransactionPassesEveryRepresentationAndShowsShieldAfterWrite() throws {
+    func testSuccessfulTransactionReturnsAfterWriteBeforeScheduledShieldPresentation() throws {
         let source = PrivateCopyPasteboardStub(representations: representations)
         let destination = PrivateCopyPasteboardStub()
         let shield = ShieldSpy(destination: destination)
-        let service = PrivateCopyService(destination: destination, shieldPresenter: shield)
+        let scheduler = ShieldSchedulerSpy()
+        let service = PrivateCopyService(
+            destination: destination,
+            shieldPresenter: shield,
+            scheduleShieldPresentation: scheduler.schedule
+        )
 
         try service.performPrivateCopy(from: source)
 
         XCTAssertEqual(destination.lastWrite?.representations, representations)
         XCTAssertEqual(destination.lastWrite?.marker, PrivateCopyService.markerTypeIdentifier)
+        XCTAssertFalse(shield.didShowSuccess)
+        XCTAssertTrue(scheduler.hasScheduledPresentation)
+
+        scheduler.runScheduledPresentation()
+
         XCTAssertTrue(shield.didShowSuccess)
         XCTAssertTrue(shield.writeWasCompleteWhenShown)
     }
 
     func testReadAndWriteFailuresNeverShowFalseShield() {
         let readShield = ShieldSpy()
+        let readScheduler = ShieldSchedulerSpy()
         let readService = PrivateCopyService(
             destination: PrivateCopyPasteboardStub(),
-            shieldPresenter: readShield
+            shieldPresenter: readShield,
+            scheduleShieldPresentation: readScheduler.schedule
         )
         XCTAssertThrowsError(try readService.performPrivateCopy(from: PrivateCopyPasteboardStub(readError: .representationReadFailed)))
         XCTAssertFalse(readShield.didShowSuccess)
+        XCTAssertFalse(readScheduler.hasScheduledPresentation)
 
         let writeShield = ShieldSpy()
+        let writeScheduler = ShieldSchedulerSpy()
         let writeService = PrivateCopyService(
             destination: PrivateCopyPasteboardStub(writeError: .writeFailed),
-            shieldPresenter: writeShield
+            shieldPresenter: writeShield,
+            scheduleShieldPresentation: writeScheduler.schedule
         )
         XCTAssertThrowsError(try writeService.performPrivateCopy(from: PrivateCopyPasteboardStub(representations: representations)))
         XCTAssertFalse(writeShield.didShowSuccess)
+        XCTAssertFalse(writeScheduler.hasScheduledPresentation)
     }
 
     func testUnsupportedServiceAndShortcutConflictExposePauseFallbackDistinctly() {
@@ -57,6 +73,24 @@ final class PrivateCopyServiceTests: XCTestCase {
             .init(kind: .rtf, data: Data("{\\rtf1 rich}".utf8), textProjection: "rich"),
             .init(kind: .html, data: Data("<b>html</b>".utf8), textProjection: nil),
         ]
+    }
+}
+
+@MainActor
+private final class ShieldSchedulerSpy {
+    private var presentation: (@MainActor () -> Void)?
+    var hasScheduledPresentation: Bool {
+        presentation != nil
+    }
+
+    func schedule(_ presentation: @escaping @MainActor () -> Void) {
+        self.presentation = presentation
+    }
+
+    func runScheduledPresentation() {
+        let presentation = presentation
+        self.presentation = nil
+        presentation?()
     }
 }
 
