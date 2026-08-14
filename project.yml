@@ -38,6 +38,24 @@ targets:
       path: ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardMac-Info.plist
       properties:
         CFBundleDisplayName: Clipboard Keyboard
+        LSUIElement: true
+        NSServices:
+          - NSKeyEquivalent:
+              default: C
+            NSMenuItem:
+              default: Private Copy
+            NSMessage: privateCopy
+            NSRequiredContext: {}
+            NSReturnTypes:
+              - public.utf8-plain-text
+              - net.daringfireball.markdown
+              - public.rtf
+              - public.html
+            NSSendTypes:
+              - public.utf8-plain-text
+              - net.daringfireball.markdown
+              - public.rtf
+              - public.html
 
   ClipboardKeyboardiOS:
     templates:

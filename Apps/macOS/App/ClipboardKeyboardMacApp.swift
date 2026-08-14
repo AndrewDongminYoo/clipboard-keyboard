@@ -5,8 +5,11 @@ struct ClipboardKeyboardMacApp: App {
     @NSApplicationDelegateAdaptor(MacAppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup {
-            Text("Clipboard Keyboard")
+        Settings {
+            MacSettingsView(
+                model: appDelegate.model.settings,
+                shortcut: appDelegate.model.shortcut
+            )
         }
     }
 }

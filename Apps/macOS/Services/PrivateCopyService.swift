@@ -1,0 +1,83 @@
+import AppKit
+import ClipboardCore
+import Foundation
+
+@MainActor
+protocol PrivateCopyShieldPresenting: AnyObject {
+    func showPrivateCopySucceeded()
+}
+
+@MainActor
+final class MacPrivateCopyShieldPresenter: PrivateCopyShieldPresenting {
+    func showPrivateCopySucceeded() {
+        let alert = NSAlert()
+        alert.messageText = "Private Copy"
+        alert.informativeText = "Copied with capture protection"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModalIfPossible()
+    }
+}
+
+private extension NSAlert {
+    func beginSheetModalIfPossible() {
+        if let window = NSApplication.shared.keyWindow {
+            beginSheetModal(for: window)
+        } else {
+            runModal()
+        }
+    }
+}
+
+@MainActor
+final class PrivateCopyFallbackState: ObservableObject {
+    @Published private(set) var message: String?
+    let actionTitle = "Pause Capture for 60 Seconds"
+    @Published private(set) var didReportSuccess = false
+
+    func serviceWasNotHandled() {
+        didReportSuccess = false
+        message = "Private Copy was not handled"
+    }
+
+    func shortcutDidConflict() {
+        didReportSuccess = false
+        message = "Private Copy shortcut conflict"
+    }
+}
+
+@MainActor
+final class PrivateCopyService: NSObject {
+    static let markerTypeIdentifier = "com.andrewdongminyoo.clipboardkeyboard.private-copy"
+
+    private let destination: any MacPasteboardReading
+    private let shieldPresenter: any PrivateCopyShieldPresenting
+
+    init(
+        destination: any MacPasteboardReading = MacPasteboardClient(),
+        shieldPresenter: any PrivateCopyShieldPresenting = MacPrivateCopyShieldPresenter()
+    ) {
+        self.destination = destination
+        self.shieldPresenter = shieldPresenter
+    }
+
+    func performPrivateCopy(from source: any MacPasteboardReading) throws {
+        let metadata = source.readMetadata()
+        let representations = try source.readSupportedRepresentations(for: metadata.changeCount)
+        try destination.writeRepresentations(representations, marker: Self.markerTypeIdentifier)
+        shieldPresenter.showPrivateCopySucceeded()
+    }
+
+    @objc(privateCopy:userData:error:)
+    func privateCopy(
+        _ pasteboard: NSPasteboard,
+        userData _: String?,
+        error errorPointer: AutoreleasingUnsafeMutablePointer<NSString?>
+    ) {
+        do {
+            try performPrivateCopy(from: MacPasteboardClient(pasteboard: pasteboard))
+        } catch {
+            errorPointer.pointee = "Private Copy could not complete"
+        }
+    }
+}
