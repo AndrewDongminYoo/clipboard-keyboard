@@ -263,6 +263,117 @@ final class LocalPinnedLibraryTests: XCTestCase {
         }
     }
 
+    func testEnsurePinnedUsesFixedIDAndRetryCreatesOneRevisionAndJournalEntry() async throws {
+        let fixture = LocalLibraryFixture()
+        defer { fixture.remove() }
+        let itemID = try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-000000000111"))
+        let value = payload("shared text", title: "Shared", category: nil)
+
+        let first = try await fixture.library.ensurePinned(payload: value, itemID: itemID)
+        let retry = try await fixture.library.ensurePinned(payload: value, itemID: itemID)
+
+        guard case let .inserted(revision) = first else { return XCTFail("Expected insert") }
+        XCTAssertEqual(revision.itemID, itemID)
+        XCTAssertEqual(retry, .alreadyPresent)
+        let state = try await fixture.store.load()
+        XCTAssertEqual(state.primaryRevisions.count, 1)
+        XCTAssertEqual(state.pendingJournal.pending.count, 1)
+    }
+
+    func testEnsurePinnedConflictingPayloadNeverOverwrites() async throws {
+        let fixture = LocalLibraryFixture()
+        defer { fixture.remove() }
+        let itemID = try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-000000000112"))
+        let original = payload("original", title: "Shared", category: nil)
+        _ = try await fixture.library.ensurePinned(payload: original, itemID: itemID)
+
+        let result = try await fixture.library.ensurePinned(
+            payload: payload("conflict", title: "Shared", category: nil),
+            itemID: itemID
+        )
+
+        XCTAssertEqual(result, .conflict)
+        let state = try await fixture.store.load()
+        XCTAssertEqual(state.primaryRevisions.first?.payload, original)
+        XCTAssertEqual(state.primaryRevisions.count, 1)
+    }
+
+    func testEnsurePinnedNeverResurrectsTombstonedID() async throws {
+        let fixture = LocalLibraryFixture()
+        defer { fixture.remove() }
+        let itemID = try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-000000000113"))
+        let value = payload("deleted", title: "Shared", category: nil)
+        _ = try await fixture.library.ensurePinned(payload: value, itemID: itemID)
+        _ = try await fixture.library.delete(itemID: itemID)
+
+        let result = try await fixture.library.ensurePinned(payload: value, itemID: itemID)
+
+        XCTAssertEqual(result, .conflict)
+        let state = try await fixture.store.load()
+        XCTAssertEqual(state.primaryRevisions, [])
+        XCTAssertEqual(state.tombstones.map(\.itemID), [itemID])
+    }
+
+    func testConcurrentEnsurePinnedSameIDCreatesExactlyOneRevision() async throws {
+        let fixture = LocalLibraryFixture()
+        defer { fixture.remove() }
+        let itemID = try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-000000000114"))
+        let value = payload("concurrent", title: "Shared", category: nil)
+
+        async let first = fixture.library.ensurePinned(payload: value, itemID: itemID)
+        async let second = fixture.library.ensurePinned(payload: value, itemID: itemID)
+        let results = try await [first, second]
+
+        XCTAssertEqual(results.filter {
+            if case .inserted = $0 {
+                true
+            } else {
+                false
+            }
+        }.count, 1)
+        XCTAssertEqual(results.filter { $0 == .alreadyPresent }.count, 1)
+        let state = try await fixture.store.load()
+        XCTAssertEqual(state.primaryRevisions.count, 1)
+        XCTAssertEqual(state.pendingJournal.pending.count, 1)
+    }
+
+    func testCancelledEnsurePinnedBeforeTransactionCreatesNothing() async throws {
+        let barrier = LocalAsyncBarrier()
+        let fixture = LocalLibraryFixture(beforeEnsurePinnedTransaction: { await barrier.suspend() })
+        defer { fixture.remove() }
+        let itemID = try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-000000000115"))
+        let value = payload("cancelled", title: "Shared", category: nil)
+        let operation = Task { try await fixture.library.ensurePinned(payload: value, itemID: itemID) }
+        await barrier.waitUntilEntered()
+
+        operation.cancel()
+        await barrier.release()
+
+        await XCTAssertThrowsLocalError(try await operation.value) { error in
+            XCTAssertTrue(error is CancellationError)
+        }
+        let state = try await fixture.store.load()
+        XCTAssertEqual(state.primaryRevisions, [])
+    }
+
+    func testStoreFailureBeforeEnsurePinnedCommitCreatesNothing() async throws {
+        let fixture = LocalLibraryFixture()
+        defer { fixture.remove() }
+        fixture.fileOperations.failNextWrite = true
+        let itemID = try XCTUnwrap(UUID(uuidString: "00000000-0000-0000-0000-000000000116"))
+
+        await XCTAssertThrowsLocalError(
+            try await fixture.library.ensurePinned(
+                payload: payload("failed", title: "Shared", category: nil),
+                itemID: itemID
+            )
+        ) { _ in }
+
+        let state = try await fixture.store.load()
+        XCTAssertEqual(state.primaryRevisions, [])
+        XCTAssertEqual(state.pendingJournal.pending, [])
+    }
+
     private func payload(_ text: String, title: String, category: ClipCategory?) -> PinPayload {
         PinPayload(
             representations: [.init(kind: .plainText, originalBytes: Data(text.utf8), keyedDigest: Data([1]))],
@@ -291,7 +402,8 @@ private final class LocalLibraryFixture: @unchecked Sendable {
     init(
         beforeReturningSearch: @escaping @Sendable () async -> Void = {},
         beforeReturningMutation: @escaping @Sendable () async -> Void = {},
-        beforeReturningSnapshot: @escaping @Sendable () async -> Void = {}
+        beforeReturningSnapshot: @escaping @Sendable () async -> Void = {},
+        beforeEnsurePinnedTransaction: @escaping @Sendable () async -> Void = {}
     ) {
         store = EncryptedPhonePinnedStore(
             fileURL: root.appendingPathComponent("pinned-replica.encrypted"),
@@ -306,7 +418,8 @@ private final class LocalLibraryFixture: @unchecked Sendable {
             now: { Date(timeIntervalSince1970: 200) },
             beforeReturningSearch: beforeReturningSearch,
             beforeReturningMutation: beforeReturningMutation,
-            beforeReturningSnapshot: beforeReturningSnapshot
+            beforeReturningSnapshot: beforeReturningSnapshot,
+            beforeEnsurePinnedTransaction: beforeEnsurePinnedTransaction
         )
     }
 
@@ -415,6 +528,12 @@ private actor RepeatingLocalAsyncBarrier {
 private final class LocalProtectedFileOperations: @unchecked Sendable {
     private let lock = NSLock()
     private var protectionByURL: [URL: FileProtectionType] = [:]
+    private var shouldFailNextWrite = false
+
+    var failNextWrite: Bool {
+        get { lock.withLock { shouldFailNextWrite } }
+        set { lock.withLock { shouldFailNextWrite = newValue } }
+    }
 
     var operations: PhonePinnedFileOperations {
         PhonePinnedFileOperations(
@@ -426,7 +545,17 @@ private final class LocalProtectedFileOperations: @unchecked Sendable {
                 }
             },
             read: { try Data(contentsOf: $0) },
-            write: { data, url in try data.write(to: url) },
+            write: { [self] data, url in
+                let shouldFail = lock.withLock {
+                    let value = shouldFailNextWrite
+                    shouldFailNextWrite = false
+                    return value
+                }
+                if shouldFail {
+                    throw LocalPinnedLibraryError.itemNotFound
+                }
+                try data.write(to: url)
+            },
             setCompleteProtection: { [self] url in
                 lock.withLock { protectionByURL[url] = .complete }
             },

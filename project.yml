@@ -108,6 +108,7 @@ targets:
       - Extensions/Share
     settings:
       base:
+        CODE_SIGN_ENTITLEMENTS: Extensions/Share/ClipboardKeyboardShare.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: kr.donminzzi.clipboardkeyboard.ios.share
     info:
       path: ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardShare-Info.plist
@@ -115,7 +116,7 @@ targets:
         CFBundleDisplayName: Clipboard Keyboard
         NSExtension:
           NSExtensionAttributes:
-            NSExtensionActivationRule: FALSEPREDICATE
+            NSExtensionActivationRule: SUBQUERY(extensionItems, $item, $item.attachments.@count == 1 AND SUBQUERY($item.attachments, $attachment, (ANY $attachment.registeredTypeIdentifiers == "public.utf8-plain-text" OR ANY $attachment.registeredTypeIdentifiers == "public.utf16-external-plain-text" OR ANY $attachment.registeredTypeIdentifiers == "public.utf16-plain-text" OR ANY $attachment.registeredTypeIdentifiers == "public.plain-text" OR ANY $attachment.registeredTypeIdentifiers == "public.url") AND NOT (ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.file-url") AND NOT (ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.image")).@count == 1).@count == 1 AND SUBQUERY(extensionItems, $item, $item.attachments.@count > 0).@count == 1
           NSExtensionPointIdentifier: com.apple.share-services
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
 
@@ -157,6 +158,7 @@ targets:
     platform: iOS
     sources:
       - Tests/Share
+      - Extensions/Share
     dependencies:
       - target: ClipboardKeyboardShare
 

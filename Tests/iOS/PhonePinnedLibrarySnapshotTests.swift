@@ -223,6 +223,73 @@ final class PhonePinnedLibrarySnapshotTests: XCTestCase {
         XCTAssertFalse(publisher.stalePublicationDetected)
     }
 
+    func testShareEnsureUsesInboxIDAndPublishesOnlyForNewInsert() async throws {
+        let publisher = SnapshotPublisherSpy()
+        let backend = SnapshotLibraryFake(items: [])
+        let gate = PhonePinnedLibraryGate(snapshotPublisher: publisher)
+        let unlock = gate.beginUnlock()
+        XCTAssertTrue(gate.install(
+            backend,
+            textTransformer: TextTransformer { Data($0) },
+            for: unlock,
+            generation: 1
+        ))
+        let item = try ShareInboxItem.make(
+            id: uuid(77),
+            createdAt: Date(timeIntervalSince1970: 100),
+            kind: .text,
+            data: Data("shared".utf8)
+        )
+
+        let inserted = try await gate.ensurePinnedShareItem(item)
+        let retried = try await gate.ensurePinnedShareItem(item)
+
+        guard case let .inserted(revision) = inserted else { return XCTFail("Expected insert") }
+        XCTAssertEqual(revision.itemID, item.id)
+        XCTAssertEqual(revision.payload.representations.map(\.originalBytes), [item.data])
+        XCTAssertEqual(revision.payload.representations.map(\.keyedDigest), [item.data])
+        XCTAssertEqual(retried, .alreadyPresent)
+        let backendItems = try await backend.allItems()
+        XCTAssertEqual(backendItems.map(\.itemID), [item.id])
+        XCTAssertEqual(publisher.publishCount, 1)
+    }
+
+    func testShareEnsureRevalidatesForgedItemBeforeResolutionOrStoreMutation() async throws {
+        let publisher = SnapshotPublisherSpy()
+        let backend = SnapshotLibraryFake(items: [])
+        let gate = PhonePinnedLibraryGate(snapshotPublisher: publisher)
+        let unlock = gate.beginUnlock()
+        XCTAssertTrue(gate.install(
+            backend,
+            textTransformer: TextTransformer { Data($0) },
+            for: unlock,
+            generation: 1
+        ))
+        let valid = try ShareInboxItem.make(
+            id: uuid(78),
+            createdAt: Date(timeIntervalSince1970: 100),
+            kind: .text,
+            data: Data("shared".utf8)
+        )
+        let forged = ShareInboxItem(
+            schemaVersion: valid.schemaVersion,
+            id: valid.id,
+            createdAt: valid.createdAt,
+            kind: valid.kind,
+            data: valid.data,
+            digest: String(repeating: "0", count: 64)
+        )
+
+        do {
+            _ = try await gate.ensurePinnedShareItem(forged)
+            XCTFail("Expected validation failure")
+        } catch {}
+
+        let backendItems = try await backend.allItems()
+        XCTAssertEqual(backendItems.count, 0)
+        XCTAssertEqual(publisher.publishCount, 0)
+    }
+
     private func installedGate(
         publisher: SnapshotPublisherSpy,
         backend: SnapshotLibraryFake
@@ -326,7 +393,7 @@ private final class SnapshotPublisherSpy: KeyboardSnapshotPublishing {
     }
 }
 
-private actor SnapshotLibraryFake: PinnedLibrary {
+private actor SnapshotLibraryFake: ShareFixedIDPinnedLibrary {
     private var items: [PinnedRevision]
     private var generation: Int64 = 1
     private let mutationBarrier: SnapshotBarrier?
@@ -367,6 +434,18 @@ private actor SnapshotLibraryFake: PinnedLibrary {
         items.append(revision)
         await mutationBarrier?.suspend()
         return revision
+    }
+
+    func ensurePinned(payload: PinPayload, itemID: UUID) async throws -> SharePinEnsureResult {
+        if let existing = items.first(where: { $0.itemID == itemID }) {
+            return existing.payload == payload ? .alreadyPresent : .conflict
+        }
+        let revision = PinnedRevision(
+            itemID: itemID, revisionID: UUID(), libraryGeneration: generation, itemGeneration: 1,
+            modifiedAt: Date(), deviceID: "test", payload: payload
+        )
+        items.append(revision)
+        return .inserted(revision)
     }
 
     func revise(itemID: UUID, payload: PinPayload) async throws -> PinnedRevision {

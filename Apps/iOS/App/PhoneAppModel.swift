@@ -23,7 +23,7 @@ func observePhoneProtectedDataWillBecomeUnavailable(
 }
 
 @MainActor
-final class PhonePinnedLibraryGate: PinnedLibrary {
+final class PhonePinnedLibraryGate: PinnedLibrary, ShareInboxPinning {
     private typealias Session = (backend: any PinnedLibrary, epoch: UInt64, lease: ProtectedDataLease)
 
     private let snapshotPublisher: any KeyboardSnapshotPublishing
@@ -186,6 +186,38 @@ final class PhonePinnedLibraryGate: PinnedLibrary {
             try validate(epoch, lease: lease)
             snapshotGeneration = result.libraryGeneration
             try? await refreshKeyboardSnapshotLocked(session)
+            return result
+        }
+    }
+
+    func ensurePinnedShareItem(_ item: ShareInboxItem) async throws -> SharePinEnsureResult {
+        let encoded = try ShareInboxItemCodec().encode(item)
+        guard ShareInboxItemValidator().validate(encoded) == .valid(item) else {
+            throw ShareInboxItemValidationFailure.malformed
+        }
+        guard let text = String(data: item.data, encoding: .utf8) else {
+            throw ShareInboxItemValidationFailure.invalidUTF8
+        }
+        let raw = RawTextRepresentation(kind: .plainText, data: item.data, textProjection: text)
+        let payload = try PinPayload(
+            representations: representations(for: raw),
+            canonicalInsertionString: text,
+            title: item.kind == .url ? "Shared URL" : "Shared Text",
+            contentKind: .plainText,
+            category: nil
+        )
+        let session = try currentBackend()
+        return try await withSerializedSnapshotOperation(session) { session in
+            let (backend, epoch, lease) = session
+            guard let fixedIDBackend = backend as? any ShareFixedIDPinnedLibrary else {
+                throw LocalPinnedLibraryError.itemNotFound
+            }
+            let result = try await fixedIDBackend.ensurePinned(payload: payload, itemID: item.id)
+            try validate(epoch, lease: lease)
+            if case let .inserted(revision) = result {
+                snapshotGeneration = revision.libraryGeneration
+                try? await refreshKeyboardSnapshotLocked(session)
+            }
             return result
         }
     }
@@ -419,8 +451,12 @@ final class PhoneAppModel: ObservableObject {
     let libraryViewModel: LibraryViewModel
     let extractViewModel: ExtractViewModel
     let importExportViewModel: ImportExportViewModel
+    @Published private(set) var pendingShare: ShareInboxItem?
+    @Published private(set) var shareCommitInProgress = false
+    @Published private(set) var shareErrorMessage: String?
 
     private let libraryGate: PhonePinnedLibraryGate
+    private let shareInboxConsumer: ShareInboxConsumer?
     private var localLibrary: LocalPinnedLibrary?
     private var observers: Set<AnyCancellable> = []
 
@@ -440,13 +476,67 @@ final class PhoneAppModel: ObservableObject {
             library: gate,
             representations: { raw in try gate.representations(for: raw) }
         )
+        if let container = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: "group.kr.donminzzi.clipboardkeyboard"
+        ) {
+            shareInboxConsumer = ShareInboxConsumer(
+                directory: container.appendingPathComponent("share-inbox", isDirectory: true),
+                pinner: gate
+            )
+        } else {
+            shareInboxConsumer = nil
+        }
 
         observeProtectedDataLifecycle()
         if protectedDataAvailable {
             Task { await protectedDataDidBecomeAvailable() }
         } else {
             libraryViewModel.protectedDataWillBecomeUnavailable()
+            shareInboxConsumer?.protectedDataWillBecomeUnavailable()
         }
+    }
+
+    func sceneDidBecomeActive() async {
+        guard UIApplication.shared.isProtectedDataAvailable, localLibrary != nil else { return }
+        shareInboxConsumer?.protectedDataDidBecomeAvailable()
+        await refreshShareInbox()
+    }
+
+    func confirmPendingShare() async {
+        guard let item = pendingShare, let shareInboxConsumer else { return }
+        shareCommitInProgress = true
+        shareErrorMessage = nil
+        do {
+            try await shareInboxConsumer.commit(id: item.id)
+            pendingShare = nil
+            await libraryViewModel.load()
+            await refreshShareInbox()
+        } catch ShareInboxConsumerError.conflict {
+            pendingShare = nil
+            await refreshShareInbox()
+        } catch {
+            shareErrorMessage = "Unable to pin this shared item."
+        }
+        shareCommitInProgress = false
+    }
+
+    func rejectPendingShare() async {
+        guard let item = pendingShare, let shareInboxConsumer else { return }
+        shareCommitInProgress = true
+        shareErrorMessage = nil
+        do {
+            try shareInboxConsumer.reject(id: item.id)
+            pendingShare = nil
+            await refreshShareInbox()
+        } catch {
+            shareErrorMessage = "Unable to remove this shared item."
+        }
+        shareCommitInProgress = false
+    }
+
+    func dismissPendingShare() {
+        pendingShare = nil
+        shareErrorMessage = nil
     }
 
     private func observeProtectedDataLifecycle() {
@@ -463,6 +553,9 @@ final class PhoneAppModel: ObservableObject {
 
     private func protectedDataWillBecomeUnavailable() {
         libraryGate.lock()
+        shareInboxConsumer?.protectedDataWillBecomeUnavailable()
+        pendingShare = nil
+        shareErrorMessage = nil
         libraryViewModel.protectedDataWillBecomeUnavailable()
         extractViewModel.protectedDataWillBecomeUnavailable()
         importExportViewModel.protectedDataWillBecomeUnavailable()
@@ -499,10 +592,26 @@ final class PhoneAppModel: ObservableObject {
             }
             localLibrary = backend.library
             await libraryViewModel.load()
+            if UIApplication.shared.applicationState == .active {
+                shareInboxConsumer?.protectedDataDidBecomeAvailable()
+                await refreshShareInbox()
+            }
         } catch {
             if libraryGate.failUnlock(unlock) {
                 libraryViewModel.protectedDataWillBecomeUnavailable()
             }
+        }
+    }
+
+    private func refreshShareInbox() async {
+        guard let shareInboxConsumer else { return }
+        do {
+            let items = try await shareInboxConsumer.pendingItems()
+            try? shareInboxConsumer.purgeTerminalItems()
+            pendingShare = items.first
+            shareErrorMessage = nil
+        } catch {
+            pendingShare = nil
         }
     }
 

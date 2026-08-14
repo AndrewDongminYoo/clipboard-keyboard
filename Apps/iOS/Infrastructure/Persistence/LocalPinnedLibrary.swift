@@ -7,7 +7,17 @@ enum LocalPinnedLibraryError: Error, Equatable {
     case snapshotChanged
 }
 
-actor LocalPinnedLibrary: PinnedLibrary {
+enum SharePinEnsureResult: Equatable, Sendable {
+    case inserted(PinnedRevision)
+    case alreadyPresent
+    case conflict
+}
+
+protocol ShareFixedIDPinnedLibrary: PinnedLibrary {
+    func ensurePinned(payload: PinPayload, itemID: UUID) async throws -> SharePinEnsureResult
+}
+
+actor LocalPinnedLibrary: ShareFixedIDPinnedLibrary {
     private let store: EncryptedPhonePinnedStore
     private let lease: ProtectedDataLease
     private let deviceID: String
@@ -15,6 +25,7 @@ actor LocalPinnedLibrary: PinnedLibrary {
     private let beforeReturningSearch: @Sendable () async -> Void
     private let beforeReturningMutation: @Sendable () async -> Void
     private let beforeReturningSnapshot: @Sendable () async -> Void
+    private let beforeEnsurePinnedTransaction: @Sendable () async -> Void
     private var lifecycleEpoch: UInt64 = 0
     private var contentRevision: UInt64 = 0
 
@@ -25,7 +36,8 @@ actor LocalPinnedLibrary: PinnedLibrary {
         now: @escaping @Sendable () -> Date = Date.init,
         beforeReturningSearch: @escaping @Sendable () async -> Void = {},
         beforeReturningMutation: @escaping @Sendable () async -> Void = {},
-        beforeReturningSnapshot: @escaping @Sendable () async -> Void = {}
+        beforeReturningSnapshot: @escaping @Sendable () async -> Void = {},
+        beforeEnsurePinnedTransaction: @escaping @Sendable () async -> Void = {}
     ) {
         self.store = store
         self.lease = lease
@@ -34,6 +46,7 @@ actor LocalPinnedLibrary: PinnedLibrary {
         self.beforeReturningSearch = beforeReturningSearch
         self.beforeReturningMutation = beforeReturningMutation
         self.beforeReturningSnapshot = beforeReturningSnapshot
+        self.beforeEnsurePinnedTransaction = beforeEnsurePinnedTransaction
     }
 
     func allItems() async throws -> [PinnedRevision] {
@@ -96,6 +109,44 @@ actor LocalPinnedLibrary: PinnedLibrary {
         await beforeReturningMutation()
         try validateLifecycle(lifecycle)
         contentRevision &+= 1
+        return result
+    }
+
+    func ensurePinned(payload: PinPayload, itemID: UUID) async throws -> SharePinEnsureResult {
+        try Task.checkCancellation()
+        await beforeEnsurePinnedTransaction()
+        try Task.checkCancellation()
+        let lifecycle = lifecycleEpoch
+        let revisionID = UUID()
+        let modifiedAt = now()
+        let deviceID = deviceID
+        let result = try await store.transaction { state in
+            try Task.checkCancellation()
+            if state.tombstones.contains(where: { $0.itemID == itemID }) ||
+                state.conflictCopies.contains(where: { $0.revision.itemID == itemID })
+            {
+                return SharePinEnsureResult.conflict
+            }
+            if let existing = state.primaryRevisions.first(where: { $0.itemID == itemID }) {
+                return existing.payload == payload ? .alreadyPresent : .conflict
+            }
+            let revision = PinnedRevision(
+                itemID: itemID,
+                revisionID: revisionID,
+                libraryGeneration: state.libraryGeneration,
+                itemGeneration: 1,
+                modifiedAt: modifiedAt,
+                deviceID: deviceID,
+                payload: payload
+            )
+            Self.applyLocal(.revision(revision), to: &state)
+            return .inserted(revision)
+        }
+        await beforeReturningMutation()
+        try validateLifecycle(lifecycle)
+        if case .inserted = result {
+            contentRevision &+= 1
+        }
         return result
     }
 

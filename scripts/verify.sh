@@ -43,7 +43,33 @@ if ! share_activation_rule="$(plutil -extract NSExtension.NSExtensionAttributes.
 	echo "share generated plist contract failed" >&2
 	exit 1
 fi
-if [[ ${share_activation_rule} != "FALSEPREDICATE" ]]; then
+
+share_activation_rule_is_valid() {
+	local candidate_rule="$1"
+	[[ ${candidate_rule} != *"TRUEPREDICATE"* &&
+		${candidate_rule} != *"FALSEPREDICATE"* &&
+		${candidate_rule} != *'UTI-CONFORMS-TO "public.text"'* &&
+		${candidate_rule} == *'== "public.utf8-plain-text"'* &&
+		${candidate_rule} == *'== "public.utf16-external-plain-text"'* &&
+		${candidate_rule} == *'== "public.utf16-plain-text"'* &&
+		${candidate_rule} == *'== "public.plain-text"'* &&
+		${candidate_rule} == *'== "public.url"'* &&
+		${candidate_rule} == *'UTI-CONFORMS-TO "public.file-url"'* &&
+		${candidate_rule} == *'UTI-CONFORMS-TO "public.image"'* &&
+		${candidate_rule} == *"\$item.attachments.@count == 1"* ]]
+}
+
+if share_activation_rule_is_valid "FALSEPREDICATE"; then
+	echo "share activation guard negative regression failed" >&2
+	exit 1
+fi
+# shellcheck disable=SC2016
+broad_text_regression='UTI-CONFORMS-TO "public.text" == "public.utf8-plain-text" == "public.utf16-external-plain-text" == "public.utf16-plain-text" == "public.plain-text" == "public.url" UTI-CONFORMS-TO "public.file-url" UTI-CONFORMS-TO "public.image" $item.attachments.@count == 1'
+if share_activation_rule_is_valid "${broad_text_regression}"; then
+	echo "share activation guard broad-text negative regression failed" >&2
+	exit 1
+fi
+if ! share_activation_rule_is_valid "${share_activation_rule}"; then
 	echo "share generated plist contract failed" >&2
 	exit 1
 fi
