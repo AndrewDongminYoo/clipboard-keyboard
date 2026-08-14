@@ -102,6 +102,14 @@ final class PhonePinnedLibraryGate: PinnedLibrary {
         return try textTransformer.render(content, as: .plainText)
     }
 
+    func representations(for raw: RawTextRepresentation) throws -> [ClipRepresentation] {
+        guard let textTransformer, installedLease?.isActive == true else {
+            throw EncryptedPhonePinnedStoreError.protectedDataUnavailable
+        }
+        let resolved = try RepresentationResolver().resolve([raw])
+        return try textTransformer.render(resolved, as: .originalCompatible)
+    }
+
     func allItems() async throws -> [PinnedRevision] {
         let (backend, epoch, lease) = try currentBackend()
         let result = try await backend.allItems()
@@ -172,6 +180,8 @@ final class PhonePinnedLibraryGate: PinnedLibrary {
 @MainActor
 final class PhoneAppModel: ObservableObject {
     let libraryViewModel: LibraryViewModel
+    let extractViewModel: ExtractViewModel
+    let importExportViewModel: ImportExportViewModel
 
     private let libraryGate: PhonePinnedLibraryGate
     private var localLibrary: LocalPinnedLibrary?
@@ -184,6 +194,14 @@ final class PhoneAppModel: ObservableObject {
         libraryViewModel = LibraryViewModel(
             library: gate,
             representations: { text in try await gate.representations(for: text) }
+        )
+        extractViewModel = ExtractViewModel(
+            library: gate,
+            representations: { text in try gate.representations(for: text) }
+        )
+        importExportViewModel = ImportExportViewModel(
+            library: gate,
+            representations: { raw in try gate.representations(for: raw) }
         )
 
         observeProtectedDataLifecycle()
@@ -209,6 +227,8 @@ final class PhoneAppModel: ObservableObject {
     private func protectedDataWillBecomeUnavailable() {
         libraryGate.lock()
         libraryViewModel.protectedDataWillBecomeUnavailable()
+        extractViewModel.protectedDataWillBecomeUnavailable()
+        importExportViewModel.protectedDataWillBecomeUnavailable()
         let previousLibrary = localLibrary
         localLibrary = nil
         guard let previousLibrary else { return }
