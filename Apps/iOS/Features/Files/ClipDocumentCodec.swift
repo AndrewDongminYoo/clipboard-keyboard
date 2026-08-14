@@ -29,7 +29,7 @@ enum ClipDocumentFormat: String, CaseIterable, Equatable, Sendable {
     var contentType: UTType {
         switch self {
         case .plainText: .plainText
-        case .markdown: UTType("net.daringfireball.markdown")!
+        case .markdown: UTType(importedAs: "net.daringfireball.markdown", conformingTo: .plainText)
         case .rtf: .rtf
         case .html: .html
         }

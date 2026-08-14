@@ -4,6 +4,13 @@ import UniformTypeIdentifiers
 import XCTest
 
 final class ClipDocumentCodecTests: XCTestCase {
+    func testMarkdownContentTypeDoesNotDependOnSystemRegistration() {
+        let markdown = ClipDocumentFormat.markdown.contentType
+
+        XCTAssertEqual(markdown.identifier, "net.daringfireball.markdown")
+        XCTAssertTrue(markdown.conforms(to: .plainText))
+    }
+
     func testEverySupportedFormatRoundTripsExactBytesAndRequiredExtension() throws {
         let attributed = NSAttributedString(string: "RTF 한글\r\nline")
         let rtf = try attributed.data(

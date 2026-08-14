@@ -77,6 +77,16 @@ targets:
       path: ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardiOS-Info.plist
       properties:
         CFBundleDisplayName: Clipboard Keyboard
+        UTImportedTypeDeclarations:
+          - UTTypeConformsTo:
+              - public.plain-text
+            UTTypeDescription: Markdown
+            UTTypeIdentifier: net.daringfireball.markdown
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - md
+                - markdown
+              public.mime-type: text/markdown
 
   ClipboardKeyboardKeyboard:
     templates:
