@@ -157,6 +157,51 @@ final class PendingMutationJournalTests: XCTestCase {
         XCTAssertEqual(journal.pending, expected)
     }
 
+    func testRecoveryReplaysConflictAsSourceRevisionSoThirdDeviceDeletionWins() {
+        let itemID = uuid(21)
+        let losing = revision(
+            itemID: itemID,
+            revisionID: uuid(22),
+            generation: 4,
+            itemGeneration: 1,
+            modifiedAt: 10,
+            deviceID: "a",
+            value: "losing"
+        )
+        let primary = revision(
+            itemID: itemID,
+            revisionID: uuid(23),
+            generation: 4,
+            itemGeneration: 1,
+            modifiedAt: 20,
+            deviceID: "b",
+            value: "primary"
+        )
+        var sourceReplica = PinnedReplica()
+        _ = sourceReplica.apply(.revision(losing))
+        _ = sourceReplica.apply(.revision(primary))
+        var journal = PendingMutationJournal()
+        journal.replaceForRecovery(with: sourceReplica.state)
+
+        var thirdDevice = PinnedReplica()
+        for mutation in journal.pending {
+            _ = thirdDevice.apply(mutation)
+        }
+        let tombstone = PinnedTombstone(
+            itemID: itemID,
+            tombstoneID: uuid(24),
+            libraryGeneration: 4,
+            itemGeneration: 2,
+            modifiedAt: Date(timeIntervalSince1970: 30),
+            deviceID: "c"
+        )
+        _ = thirdDevice.apply(.tombstone(tombstone))
+
+        XCTAssertEqual(thirdDevice.state.tombstones, [tombstone])
+        XCTAssertTrue(thirdDevice.state.primaryRevisions.isEmpty)
+        XCTAssertTrue(thirdDevice.state.conflictCopies.isEmpty)
+    }
+
     private func reset(id: UUID, generation: Int64, modifiedAt: TimeInterval, deviceID: String) -> PinnedMutation {
         .reset(
             LibraryResetGeneration(

@@ -47,8 +47,11 @@ private struct PhoneRootView: View {
                 syncStatus: model.syncStatus,
                 syncEnabled: $model.syncEnabled,
                 recoveryActionInProgress: model.recoveryActionInProgress,
+                cloudDeletionStatus: model.cloudDeletionStatus,
+                cloudDeletionInProgress: model.cloudDeletionInProgress,
                 keepLocalAndTurnSyncOff: { await model.keepLocalAndTurnSyncOff() },
-                reuploadLocalPins: { await model.reuploadLocalPins() }
+                reuploadLocalPins: { await model.reuploadLocalPins() },
+                deleteCloudData: { await model.deleteCloudData() }
             )
             .tabItem { Label("Settings", systemImage: "gearshape") }
         }

@@ -404,7 +404,7 @@ final class LocalPinnedLibraryTests: XCTestCase {
     }
 }
 
-private final class LocalLibraryFixture: @unchecked Sendable {
+final class LocalLibraryFixture: @unchecked Sendable {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
     let fileOperations = LocalProtectedFileOperations()
     let lease = ProtectedDataLease()
@@ -544,7 +544,7 @@ private actor RepeatingLocalAsyncBarrier {
     }
 }
 
-private final class LocalProtectedFileOperations: @unchecked Sendable {
+final class LocalProtectedFileOperations: @unchecked Sendable {
     private let lock = NSLock()
     private var protectionByURL: [URL: FileProtectionType] = [:]
     private var shouldFailNextWrite = false

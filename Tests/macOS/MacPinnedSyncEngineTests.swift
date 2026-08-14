@@ -6,6 +6,31 @@ import Foundation
 import XCTest
 
 final class MacPinnedSyncEngineTests: XCTestCase {
+    func testStartupSendAndJournalDrainNeverOverlap() async throws {
+        let mutation = makeMutation(88)
+        let barrier = MacSendBarrier()
+        let fake = FakeMacSyncTransport(sendBarrier: barrier)
+        let engine = MacPinnedSyncEngine(
+            makeTransport: { fake },
+            pendingMutations: { [mutation] }
+        )
+        let enabling = Task { try await engine.setEnabled(true) }
+        await barrier.waitUntilEntered()
+
+        await engine.localJournalDidChange()
+        for _ in 0 ..< 100 {
+            await Task.yield()
+        }
+
+        let sendsBeforeRelease = await fake.calls.filter { $0 == .send }.count
+        XCTAssertEqual(sendsBeforeRelease, 1)
+        await barrier.release()
+        try await enabling.value
+        await fake.waitUntilSendCount(2)
+        let sendsAfterRelease = await fake.calls.filter { $0 == .send }.count
+        XCTAssertEqual(sendsAfterRelease, 2)
+    }
+
     func testRetryableInitialFetchKeepsEnabledSessionForRefreshSendAndAcknowledgement() async throws {
         let mutation = makeMutation(86)
         let journal = JournalBox([mutation])

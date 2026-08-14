@@ -32,20 +32,29 @@ struct IntentReadyBackend: Sendable {
     let generation: Int64
     let close: @MainActor @Sendable () async -> Void
     let syncEngine: PhonePinnedSyncEngine?
+    let cloudDeletionServices: CloudDeletionServices?
 
     init(
         library: any PinnedLibrary,
         textTransformer: TextTransformer,
         generation: Int64,
         close: @escaping @MainActor @Sendable () async -> Void,
-        syncEngine: PhonePinnedSyncEngine? = nil
+        syncEngine: PhonePinnedSyncEngine? = nil,
+        cloudDeletionServices: CloudDeletionServices? = nil
     ) {
         self.library = library
         self.textTransformer = textTransformer
         self.generation = generation
         self.close = close
         self.syncEngine = syncEngine
+        self.cloudDeletionServices = cloudDeletionServices
     }
+}
+
+struct CloudDeletionServices: Sendable {
+    let deleteRemoteContentKeepingReset: @MainActor @Sendable (LibraryResetGeneration) async throws -> Void
+    let resetSyncState: @MainActor @Sendable () async throws -> Void
+    let acknowledgeReset: @MainActor @Sendable (UUID) async throws -> Void
 }
 
 struct IntentActionOutcome: Equatable, Sendable {
@@ -112,6 +121,9 @@ final class IntentDependencies: @unchecked Sendable {
     private let extractor: ValueExtractor
     private let syncPreferenceStore: any PhoneSyncPreferencePersisting
     private let beforeSyncReconciliation: @MainActor @Sendable () async -> Void
+    private let cloudDeletionRequestStore: any CloudDeletionRequestPersisting
+    private let cloudDeletionAuthenticate: CloudDeletionCoordinator.Authenticate
+    private let protectedDataAvailability: PhoneProtectedDataAvailability
     private var readinessOperation: ReadinessOperation?
     private var readinessWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var installedClose: (@MainActor @Sendable () async -> Void)?
@@ -124,7 +136,16 @@ final class IntentDependencies: @unchecked Sendable {
     private var syncReconciliationTask: Task<Void, Never>?
     private var remoteContentChanged: (@MainActor @Sendable () async -> Void)?
     private var syncStatusChanged: (@MainActor @Sendable (PhonePinnedSyncStatus) -> Void)?
+    private var cloudDeletionServices: CloudDeletionServices?
     private(set) var syncStatus: PhonePinnedSyncStatus = .disabled
+    private(set) lazy var cloudDeletionCoordinator = CloudDeletionCoordinator(
+        requestStore: cloudDeletionRequestStore,
+        authenticate: cloudDeletionAuthenticate,
+        backend: { [weak self] in
+            guard let self else { throw CloudDeletionCoordinatorError.unavailable }
+            return try self.makeCloudDeletionBackend()
+        }
+    )
 
     var readinessWaiterCount: Int {
         readinessWaiters.count
@@ -132,19 +153,31 @@ final class IntentDependencies: @unchecked Sendable {
 
     init(
         gate: PhonePinnedLibraryGate = PhonePinnedLibraryGate(snapshotPublisher: KeyboardSnapshotPublisher()),
-        readiness: @escaping Readiness = IntentDependencies.prepareProductionBackend,
+        readiness: Readiness? = nil,
         extractor: ValueExtractor = ValueExtractor(),
         protectedDataAvailable: Bool = UIApplication.shared.isProtectedDataAvailable,
         syncPreferenceStore: any PhoneSyncPreferencePersisting = UserDefaultsPhoneSyncPreferenceStore(),
         beforeSyncReconciliation: @escaping @MainActor @Sendable () async -> Void = {},
+        cloudDeletionRequestStore: any CloudDeletionRequestPersisting = UserDefaultsCloudDeletionRequestStore(),
+        cloudDeletionAuthenticate: @escaping CloudDeletionCoordinator.Authenticate = CloudDeletionCoordinator
+            .authenticateDeviceOwner,
         pasteboardWrite: @escaping PasteboardWrite = { value in try SystemPasteboardWriter().write(value) }
     ) {
+        let availability = PhoneProtectedDataAvailability(initialValue: protectedDataAvailable)
         self.gate = gate
-        self.readiness = readiness
+        self.readiness = readiness ?? { unlock in
+            try await IntentDependencies.prepareProductionBackend(
+                unlock: unlock,
+                protectedDataAvailable: { availability.isAvailable }
+            )
+        }
         self.extractor = extractor
         self.protectedDataAvailable = protectedDataAvailable
+        protectedDataAvailability = availability
         self.syncPreferenceStore = syncPreferenceStore
         self.beforeSyncReconciliation = beforeSyncReconciliation
+        self.cloudDeletionRequestStore = cloudDeletionRequestStore
+        self.cloudDeletionAuthenticate = cloudDeletionAuthenticate
         desiredSyncEnabled = syncPreferenceStore.load()
         self.pasteboardWrite = pasteboardWrite
     }
@@ -178,12 +211,14 @@ final class IntentDependencies: @unchecked Sendable {
     func lock() {
         lifecycleEpoch &+= 1
         protectedDataAvailable = false
+        protectedDataAvailability.update(false)
         readinessOperation?.task.cancel()
         readinessOperation = nil
         finishReadinessWaiters(with: .failure(ClipboardIntentError.unavailable))
         isReady = false
         let engine = syncEngine
         syncEngine = nil
+        cloudDeletionServices = nil
         syncPreferenceRevision &+= 1
         gate.localMutationCommitted = nil
         if let engine {
@@ -200,6 +235,7 @@ final class IntentDependencies: @unchecked Sendable {
     @discardableResult
     func protectedDataDidBecomeAvailable() -> IntentRuntimeLifecycleToken {
         protectedDataAvailable = true
+        protectedDataAvailability.update(true)
         return IntentRuntimeLifecycleToken(epoch: lifecycleEpoch)
     }
 
@@ -250,6 +286,7 @@ final class IntentDependencies: @unchecked Sendable {
             }
             installedClose = backend.close
             syncEngine = backend.syncEngine
+            cloudDeletionServices = backend.cloudDeletionServices
             if let syncEngine = backend.syncEngine {
                 await syncEngine.installRemoteApply { [weak self] mutation in
                     guard let self else { throw ClipboardIntentError.unavailable }
@@ -447,7 +484,10 @@ final class IntentDependencies: @unchecked Sendable {
         }
     }
 
-    private static func prepareProductionBackend(unlock: PhoneUnlockContext) async throws -> IntentReadyBackend {
+    private static func prepareProductionBackend(
+        unlock: PhoneUnlockContext,
+        protectedDataAvailable: @escaping @Sendable () -> Bool
+    ) async throws -> IntentReadyBackend {
         let key = try PhoneKeychainMasterKeyStore().loadOrCreateKey()
         let directory = try FileManager.default.url(
             for: .applicationSupportDirectory,
@@ -470,7 +510,12 @@ final class IntentDependencies: @unchecked Sendable {
             key: key
         )
         let syncEngine = PhonePinnedSyncEngine(
-            makeTransport: { PhoneCloudKitTransport(stateStore: syncStateStore) },
+            makeTransport: {
+                PhoneCloudKitTransport(
+                    stateStore: syncStateStore,
+                    protectedDataAvailable: protectedDataAvailable
+                )
+            },
             pendingMutations: { try await store.load().pendingJournal.pending },
             acknowledge: { ids in
                 try await store.transaction { state in
@@ -505,6 +550,7 @@ final class IntentDependencies: @unchecked Sendable {
             },
             resetSyncStateForRecovery: { try await syncStateStore.resetForRecovery() }
         )
+        let cloudDataDeleter = PhoneCloudDataDeleter()
         try await library.reopenProtectedData()
         let state = try await store.load()
         let transformer = TextTransformer { data in
@@ -518,7 +564,28 @@ final class IntentDependencies: @unchecked Sendable {
                 await syncEngine.lock()
                 await library.protectedDataWillBecomeUnavailable()
             },
-            syncEngine: syncEngine
+            syncEngine: syncEngine,
+            cloudDeletionServices: CloudDeletionServices(
+                deleteRemoteContentKeepingReset: { reset in
+                    try await cloudDataDeleter.deleteAllContentKeepingReset(reset)
+                },
+                resetSyncState: { try await syncStateStore.resetForRecovery() },
+                acknowledgeReset: { resetID in
+                    try await store.transaction { state in
+                        var journal = state.pendingJournal
+                        journal.acknowledge(mutationID: resetID)
+                        state = PinnedReplicaState(
+                            libraryGeneration: state.libraryGeneration,
+                            reset: state.reset,
+                            primaryRevisions: state.primaryRevisions,
+                            conflictCopies: state.conflictCopies,
+                            tombstones: state.tombstones,
+                            seenMutationIDs: state.seenMutationIDs,
+                            pendingJournal: journal
+                        )
+                    }
+                }
+            )
         )
     }
 
@@ -542,6 +609,16 @@ final class IntentDependencies: @unchecked Sendable {
     func reuploadLocalPins() async throws {
         guard desiredSyncEnabled, let syncEngine else { throw ClipboardIntentError.unavailable }
         try await syncEngine.reuploadLocalPins()
+    }
+
+    func installCloudDeletionStatusChanged(
+        _ handler: @escaping @MainActor @Sendable (CloudDeletionStatus) -> Void
+    ) {
+        cloudDeletionCoordinator.installStatusObserver(handler)
+    }
+
+    func authenticateAndDeleteCloudData() async throws {
+        try await cloudDeletionCoordinator.authenticateAndDeleteCloudData()
     }
 
     private func requestSyncReconciliation() {
@@ -578,6 +655,11 @@ final class IntentDependencies: @unchecked Sendable {
                 syncReconciliationTask = nil
                 return
             }
+            if cloudDeletionCoordinator.hasPendingRequest {
+                try? await syncEngine.setEnabled(false)
+                syncReconciliationTask = nil
+                return
+            }
             let enabled = desiredSyncEnabled
             try? await syncEngine.setEnabled(enabled)
             guard revision != syncPreferenceRevision else {
@@ -585,5 +667,23 @@ final class IntentDependencies: @unchecked Sendable {
                 return
             }
         }
+    }
+
+    private func makeCloudDeletionBackend() throws -> CloudDeletionBackend {
+        guard isReady,
+              protectedDataAvailable,
+              let syncEngine,
+              let cloudDeletionServices
+        else {
+            throw CloudDeletionCoordinatorError.unavailable
+        }
+        return CloudDeletionBackend(
+            prepare: { await syncEngine.lock() },
+            advanceReset: { [gate] in try await gate.advanceResetGeneration() },
+            deleteRemoteContentKeepingReset: cloudDeletionServices.deleteRemoteContentKeepingReset,
+            resetSyncState: cloudDeletionServices.resetSyncState,
+            acknowledgeReset: cloudDeletionServices.acknowledgeReset,
+            didComplete: { [weak self] in self?.requestSyncReconciliation() }
+        )
     }
 }

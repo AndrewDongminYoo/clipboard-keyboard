@@ -25,6 +25,18 @@ final class PaletteViewModelTests: XCTestCase {
         XCTAssertTrue(model.shouldClose)
     }
 
+    func testPinnedConflictProjectionIsMarkedForVisibleBadge() async {
+        let sourceRevision = makeRevision(text: "conflict", modifiedAt: 100)
+        let conflict = PinnedConflictCopy(revision: sourceRevision).revision
+        let source = PaletteDataSourceStub(recent: [], pinned: [conflict])
+        let model = PaletteViewModel(dataSource: source, pasteboardWriter: PalettePasteboardWriterSpy())
+
+        await model.search(scope: .pinned)
+
+        XCTAssertEqual(model.items.map(\.id), [conflict.itemID])
+        XCTAssertEqual(model.items.first?.isConflict, true)
+    }
+
     func testArrowCopyAsPinExportAndDeleteAreExplicitActions() async {
         let first = makeEnvelope(text: "first", capturedAt: 200)
         let second = makeEnvelope(text: "second", capturedAt: 100)

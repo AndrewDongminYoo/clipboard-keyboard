@@ -37,7 +37,7 @@ final class LocalMacPinnedLibraryTests: XCTestCase {
         let itemsAfterDelete = try await library.allItems()
         let stateAfterDelete = try await store.load()
         XCTAssertEqual(itemsAfterDelete, [])
-        XCTAssertEqual(stateAfterDelete.pendingJournal.pending.count, 3)
+        XCTAssertEqual(stateAfterDelete.pendingJournal.pending.count, 1)
     }
 
     func testTamperedPinnedDocumentFailsClosedWithoutPlaintextFallback() async throws {
@@ -122,7 +122,7 @@ final class LocalMacPinnedLibraryTests: XCTestCase {
         _ = try await library.advanceResetGeneration()
 
         let counts = await observations.counts
-        XCTAssertEqual(counts, [1, 2, 3, 1])
+        XCTAssertEqual(counts, [1, 2, 1, 1])
     }
 
     private func payload(text: String, title: String) -> PinPayload {

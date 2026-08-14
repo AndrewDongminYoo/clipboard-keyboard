@@ -29,9 +29,9 @@ struct LibraryView: View {
                             Text(item.payload.canonicalInsertionString)
                                 .font(.body.monospaced())
                                 .lineLimit(2)
-                            Text("Sync Pending")
+                            Text(item.syncState == .conflict ? "Conflict Copy" : "Sync Pending")
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(item.syncState == .conflict ? .orange : .secondary)
                         }
                         .swipeActions(edge: .leading) {
                             Button("Edit") { model.beginEditing(item) }

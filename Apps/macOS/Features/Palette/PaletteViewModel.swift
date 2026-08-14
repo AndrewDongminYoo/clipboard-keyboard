@@ -23,6 +23,7 @@ struct PaletteItem: Identifiable, Equatable, Sendable {
     let title: String
     let category: ClipCategory?
     let isPinned: Bool
+    var isConflict = false
 }
 
 @MainActor
@@ -321,7 +322,8 @@ final class PaletteViewModel: ObservableObject {
             canonicalInsertionString: revision.payload.canonicalInsertionString,
             title: revision.payload.title,
             category: revision.payload.category,
-            isPinned: true
+            isPinned: true,
+            isConflict: revision.syncState == .conflict
         )
     }
 

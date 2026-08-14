@@ -6,11 +6,15 @@ struct PhoneSettingsView: View {
     @Binding private var syncEnabled: Bool
     private let syncStatus: PhonePinnedSyncStatus
     private let recoveryActionInProgress: Bool
+    private let cloudDeletionStatus: CloudDeletionStatus
+    private let cloudDeletionInProgress: Bool
     private let keepLocalAndTurnSyncOff: @MainActor () async -> Void
     private let reuploadLocalPins: @MainActor () async -> Void
+    private let deleteCloudData: @MainActor () async -> Void
     @State private var importerPresented = false
     @State private var importTitle = "Imported Item"
     @State private var recoveryConfirmationPresented = false
+    @State private var cloudDeletionConfirmationPresented = false
 
     init(
         storageStatus: PhoneStorageStatus,
@@ -18,15 +22,21 @@ struct PhoneSettingsView: View {
         syncStatus: PhonePinnedSyncStatus = .disabled,
         syncEnabled: Binding<Bool> = .constant(false),
         recoveryActionInProgress: Bool = false,
+        cloudDeletionStatus: CloudDeletionStatus = .idle,
+        cloudDeletionInProgress: Bool = false,
         keepLocalAndTurnSyncOff: @escaping @MainActor () async -> Void = {},
-        reuploadLocalPins: @escaping @MainActor () async -> Void = {}
+        reuploadLocalPins: @escaping @MainActor () async -> Void = {},
+        deleteCloudData: @escaping @MainActor () async -> Void = {}
     ) {
         self.storageStatus = storageStatus
         self.filesModel = filesModel
         self.syncStatus = syncStatus
         self.recoveryActionInProgress = recoveryActionInProgress
+        self.cloudDeletionStatus = cloudDeletionStatus
+        self.cloudDeletionInProgress = cloudDeletionInProgress
         self.keepLocalAndTurnSyncOff = keepLocalAndTurnSyncOff
         self.reuploadLocalPins = reuploadLocalPins
+        self.deleteCloudData = deleteCloudData
         _syncEnabled = syncEnabled
     }
 
@@ -62,6 +72,18 @@ struct PhoneSettingsView: View {
 
                 Section("Privacy") {
                     Text("Only items you explicitly pin become durable. This app does not monitor the iPhone clipboard. When sync is enabled, pinned content is stored in encrypted CloudKit fields.")
+                }
+
+                Section("Cloud Data") {
+                    Button(cloudDeletionButtonLabel, role: .destructive) {
+                        cloudDeletionConfirmationPresented = true
+                    }
+                    .disabled(cloudDeletionInProgress)
+                    Text("Deleting cloud data requires device-owner authentication. Local pins and keyboard content are cleared immediately, while completion remains pending until iCloud confirms the deletion and the content-free reset record.")
+                        .foregroundStyle(.secondary)
+                    if let cloudDeletionStatusLabel {
+                        LabeledContent("Deletion", value: cloudDeletionStatusLabel)
+                    }
                 }
 
                 Section("Import") {
@@ -115,6 +137,18 @@ struct PhoneSettingsView: View {
         } message: {
             Text("This replaces the local outgoing queue and starts a new sync session. It does not delete remote records.")
         }
+        .confirmationDialog(
+            "Delete all synced clipboard data?",
+            isPresented: $cloudDeletionConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Cloud Data", role: .destructive) {
+                Task { await deleteCloudData() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This clears local pinned and keyboard content, deletes the app's private iCloud zone, and keeps one content-free reset record so stale devices cannot restore deleted content.")
+        }
     }
 
     private var storageLabel: String {
@@ -132,6 +166,20 @@ struct PhoneSettingsView: View {
         case .accountUnavailable: "Account Unavailable"
         case .recoveryRequired: "Recovery Required"
         case .disabled, .synced: nil
+        }
+    }
+
+    private var cloudDeletionButtonLabel: String {
+        cloudDeletionStatus == .pendingCloudConfirmation ? "Retry Delete Cloud Data" : "Delete Cloud Data"
+    }
+
+    private var cloudDeletionStatusLabel: String? {
+        switch cloudDeletionStatus {
+        case .authenticating: "Authenticating"
+        case .pendingCloudConfirmation: "Pending iCloud Confirmation"
+        case .completed: "Completed"
+        case .authenticationFailed: "Authentication Failed"
+        case .idle: nil
         }
     }
 }

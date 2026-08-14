@@ -1,8 +1,14 @@
 import Foundation
 
+public enum PinnedCloudStorageMode: Equatable, Sendable {
+    case encryptedInline
+    case encryptedAsset
+}
+
 public enum PinnedCloudDocument {
     public static let schemaVersion: Int64 = 1
     public static let zoneName = "PinnedLibrary"
+    public static let maximumInlineByteCount = 524_288
 
     public enum RecordType: String, Codable, Sendable {
         case revision = "PinnedRevision"
@@ -87,6 +93,10 @@ public enum PinnedCloudDocument {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .millisecondsSince1970
         return try decoder.decode(PinnedMutation.self, from: data)
+    }
+
+    public static func storageMode(forSerializedByteCount byteCount: Int) -> PinnedCloudStorageMode {
+        byteCount <= maximumInlineByteCount ? .encryptedInline : .encryptedAsset
     }
 
     private static func opaqueName(_ id: UUID) -> String {

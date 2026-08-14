@@ -25,7 +25,8 @@ actor LocalMacPinnedLibrary: PinnedLibrary {
     }
 
     func allItems() async throws -> [PinnedRevision] {
-        try await store.load().primaryRevisions.sorted(by: newestFirst)
+        let state = try await store.load()
+        return Self.visibleRevisions(from: state).sorted(by: newestFirst)
     }
 
     func search(_ query: String, limit: Int) async throws -> [PinnedRevision] {
@@ -65,7 +66,7 @@ actor LocalMacPinnedLibrary: PinnedLibrary {
         let modifiedAt = now()
         let deviceID = deviceID
         let revision = try await store.transaction { state in
-            guard let current = state.primaryRevisions.first(where: { $0.itemID == itemID }) else {
+            guard let current = Self.visibleRevisions(from: state).first(where: { $0.itemID == itemID }) else {
                 throw LocalMacPinnedLibraryError.itemNotFound
             }
             let revision = PinnedRevision(
@@ -84,7 +85,7 @@ actor LocalMacPinnedLibrary: PinnedLibrary {
         let modifiedAt = now()
         let deviceID = deviceID
         let tombstone = try await store.transaction { state in
-            guard let current = state.primaryRevisions.first(where: { $0.itemID == itemID }) else {
+            guard let current = Self.visibleRevisions(from: state).first(where: { $0.itemID == itemID }) else {
                 throw LocalMacPinnedLibraryError.itemNotFound
             }
             let tombstone = PinnedTombstone(
@@ -100,9 +101,13 @@ actor LocalMacPinnedLibrary: PinnedLibrary {
 
     func applyRemote(_ mutation: PinnedMutation) async throws -> MergeOutcome {
         try await store.transaction { state in
+            let contentItemIDs = Self.contentItemIDs(for: mutation, in: state)
             var replica = PinnedReplica(state: state)
             let outcome = replica.apply(mutation)
             state = replica.state
+            if case .deleted = outcome {
+                Self.scrubPendingContent(for: contentItemIDs, from: &state)
+            }
             return outcome
         }
     }
@@ -124,9 +129,13 @@ actor LocalMacPinnedLibrary: PinnedLibrary {
     }
 
     private static func applyLocal(_ mutation: PinnedMutation, to state: inout PinnedReplicaState) {
+        let contentItemIDs = contentItemIDs(for: mutation, in: state)
         var replica = PinnedReplica(state: state)
         _ = replica.apply(mutation)
         var journal = replica.state.pendingJournal
+        if case .tombstone = mutation {
+            scrubPendingContent(for: contentItemIDs, from: &journal)
+        }
         journal.enqueue(mutation)
         state = PinnedReplicaState(
             libraryGeneration: replica.state.libraryGeneration,
@@ -137,6 +146,50 @@ actor LocalMacPinnedLibrary: PinnedLibrary {
             seenMutationIDs: replica.state.seenMutationIDs,
             pendingJournal: journal
         )
+    }
+
+    private static func visibleRevisions(from state: PinnedReplicaState) -> [PinnedRevision] {
+        state.primaryRevisions + state.conflictCopies.map(\.revision)
+    }
+
+    private static func contentItemIDs(for mutation: PinnedMutation, in state: PinnedReplicaState) -> Set<UUID> {
+        guard case let .tombstone(tombstone) = mutation else {
+            return []
+        }
+        return Set(
+            [tombstone.itemID]
+                + state.conflictCopies
+                .filter { $0.sourceItemID == tombstone.itemID || $0.revision.itemID == tombstone.itemID }
+                .map(\.revision.itemID)
+        )
+    }
+
+    private static func scrubPendingContent(for itemIDs: Set<UUID>, from state: inout PinnedReplicaState) {
+        var journal = state.pendingJournal
+        scrubPendingContent(for: itemIDs, from: &journal)
+        state = PinnedReplicaState(
+            libraryGeneration: state.libraryGeneration,
+            reset: state.reset,
+            primaryRevisions: state.primaryRevisions,
+            conflictCopies: state.conflictCopies,
+            tombstones: state.tombstones,
+            seenMutationIDs: state.seenMutationIDs,
+            pendingJournal: journal
+        )
+    }
+
+    private static func scrubPendingContent(for itemIDs: Set<UUID>, from journal: inout PendingMutationJournal) {
+        let mutationIDs = journal.pending.compactMap { mutation -> UUID? in
+            switch mutation {
+            case let .revision(revision) where itemIDs.contains(revision.itemID):
+                revision.revisionID
+            case let .tombstone(tombstone) where itemIDs.contains(tombstone.itemID):
+                tombstone.tombstoneID
+            case .revision, .tombstone, .reset:
+                nil
+            }
+        }
+        journal.acknowledge(mutationIDs: mutationIDs)
     }
 
     private func normalize(_ value: String) -> String {

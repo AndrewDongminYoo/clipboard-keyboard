@@ -39,6 +39,9 @@ struct PaletteView: View {
                 HStack {
                     Text(item.preview).lineLimit(1)
                     Spacer()
+                    if item.isConflict {
+                        Text("Conflict Copy").font(.caption).foregroundStyle(.orange)
+                    }
                     Text(item.contentKind.rawValue).font(.caption).foregroundStyle(.secondary)
                 }
                 .tag(item.id)

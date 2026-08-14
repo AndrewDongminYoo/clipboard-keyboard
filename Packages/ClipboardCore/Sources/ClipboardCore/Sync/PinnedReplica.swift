@@ -67,7 +67,9 @@ public struct PinnedReplicaState: Codable, Equatable, Sendable {
         primaryRevisions.sort(by: primaryPrecedes)
         tombstones.removeAll { $0.itemID == revision.itemID }
         if clearConflicts {
-            conflictCopies.removeAll { $0.revision.itemID == revision.itemID }
+            conflictCopies.removeAll {
+                $0.sourceItemID == revision.itemID || $0.revision.itemID == revision.itemID
+            }
         }
     }
 
@@ -81,7 +83,9 @@ public struct PinnedReplicaState: Codable, Equatable, Sendable {
 
     mutating func apply(tombstone: PinnedTombstone) {
         primaryRevisions.removeAll { $0.itemID == tombstone.itemID }
-        conflictCopies.removeAll { $0.revision.itemID == tombstone.itemID }
+        conflictCopies.removeAll {
+            $0.sourceItemID == tombstone.itemID || $0.revision.itemID == tombstone.itemID
+        }
         tombstones.removeAll { $0.itemID == tombstone.itemID }
         tombstones.append(tombstone)
         tombstones.sort(by: tombstonePrecedes)
@@ -123,7 +127,9 @@ public struct PinnedReplicaState: Codable, Equatable, Sendable {
     }
 
     private mutating func normalize() {
-        let suppliedRevisions = primaryRevisions + conflictCopies.map(\.revision)
+        let suppliedPrimaryRevisions = primaryRevisions
+        let suppliedConflictCopies = conflictCopies
+        let suppliedRevisions = suppliedPrimaryRevisions + suppliedConflictCopies.map(\.revision)
         let suppliedMutationIDs = suppliedRevisions.map(\.revisionID)
             + tombstones.map(\.tombstoneID)
             + [reset?.resetID].compactMap { $0 }
@@ -140,7 +146,8 @@ public struct PinnedReplicaState: Codable, Equatable, Sendable {
             reset = nil
         }
 
-        let currentRevisions = suppliedRevisions.filter { $0.libraryGeneration == libraryGeneration }
+        let currentRevisions = suppliedPrimaryRevisions.filter { $0.libraryGeneration == libraryGeneration }
+        let currentConflicts = suppliedConflictCopies.filter { $0.revision.libraryGeneration == libraryGeneration }
         let currentTombstones = tombstones.filter { $0.libraryGeneration == libraryGeneration }
         let revisionsByID = currentRevisions.reduce(into: [UUID: PinnedRevision]()) { result, revision in
             guard let current = result[revision.revisionID] else {
@@ -156,7 +163,7 @@ public struct PinnedReplicaState: Codable, Equatable, Sendable {
         let tombstoneByItem = Dictionary(uniqueKeysWithValues: latestTombstones.map { ($0.itemID, $0) })
 
         var normalizedPrimaries: [PinnedRevision] = []
-        var normalizedConflicts: [PinnedConflictCopy] = []
+        var normalizedConflictsByRevisionID: [UUID: PinnedConflictCopy] = [:]
         var survivingTombstones = tombstoneByItem
 
         for itemID in revisionsByItem.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
@@ -176,11 +183,41 @@ public struct PinnedReplicaState: Codable, Equatable, Sendable {
             }
             survivingTombstones.removeValue(forKey: itemID)
             normalizedPrimaries.append(primary)
-            normalizedConflicts.append(contentsOf: concurrent.dropLast().map(PinnedConflictCopy.init))
+            for conflict in concurrent.dropLast().map(PinnedConflictCopy.init) {
+                normalizedConflictsByRevisionID[conflict.revision.revisionID] = conflict
+            }
+        }
+
+        for conflict in currentConflicts {
+            if let sourceTombstone = tombstoneByItem[conflict.sourceItemID],
+               sourceTombstone.itemGeneration >= conflict.revision.itemGeneration
+            {
+                continue
+            }
+            if let projectedTombstone = tombstoneByItem[conflict.revision.itemID],
+               projectedTombstone.itemGeneration >= conflict.revision.itemGeneration
+            {
+                continue
+            }
+            if let sourcePrimary = normalizedPrimaries.first(where: { $0.itemID == conflict.sourceItemID }),
+               sourcePrimary.itemGeneration > conflict.revision.itemGeneration
+            {
+                continue
+            }
+            if normalizedPrimaries.contains(where: { $0.itemID == conflict.revision.itemID }) {
+                continue
+            }
+            guard let current = normalizedConflictsByRevisionID[conflict.revision.revisionID] else {
+                normalizedConflictsByRevisionID[conflict.revision.revisionID] = conflict
+                continue
+            }
+            if canonicalBytes(of: current.revision).lexicographicallyPrecedes(canonicalBytes(of: conflict.revision)) {
+                normalizedConflictsByRevisionID[conflict.revision.revisionID] = conflict
+            }
         }
 
         primaryRevisions = normalizedPrimaries.sorted(by: primaryPrecedes)
-        conflictCopies = normalizedConflicts.sorted(by: conflictPrecedes)
+        conflictCopies = normalizedConflictsByRevisionID.values.sorted(by: conflictPrecedes)
         tombstones = survivingTombstones.values.sorted(by: tombstonePrecedes)
     }
 
@@ -287,7 +324,7 @@ public struct PinnedReplica: Sendable {
         let contentGeneration = max(
             state.primary(for: tombstone.itemID)?.itemGeneration ?? Int64.min,
             state.conflictCopies
-                .filter { $0.revision.itemID == tombstone.itemID }
+                .filter { $0.sourceItemID == tombstone.itemID || $0.revision.itemID == tombstone.itemID }
                 .map(\.revision.itemGeneration)
                 .max() ?? Int64.min
         )

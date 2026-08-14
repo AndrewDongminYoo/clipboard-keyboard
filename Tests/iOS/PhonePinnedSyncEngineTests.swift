@@ -6,6 +6,31 @@ import Foundation
 import XCTest
 
 final class PhonePinnedSyncEngineTests: XCTestCase {
+    func testStartupSendAndJournalDrainNeverOverlap() async throws {
+        let mutation = makePhoneMutation(50)
+        let barrier = PhoneSendBarrier()
+        let fake = FakePhoneSyncTransport(sendBarrier: barrier)
+        let engine = PhonePinnedSyncEngine(
+            makeTransport: { fake },
+            pendingMutations: { [mutation] }
+        )
+        let enabling = Task { try await engine.setEnabled(true) }
+        await barrier.waitUntilEntered()
+
+        await engine.localJournalDidChange()
+        for _ in 0 ..< 100 {
+            await Task.yield()
+        }
+
+        let sendsBeforeRelease = await fake.operationCounts.send
+        XCTAssertEqual(sendsBeforeRelease, 1)
+        await barrier.release()
+        try await enabling.value
+        await fake.waitUntilSendCount(2)
+        let sendsAfterRelease = await fake.operationCounts.send
+        XCTAssertEqual(sendsAfterRelease, 2)
+    }
+
     func testRetryableInitialFetchKeepsEnabledSessionForRefreshSendAndAcknowledgement() async throws {
         let mutation = makePhoneMutation(48)
         let acknowledgements = PhoneAcknowledgementBox()

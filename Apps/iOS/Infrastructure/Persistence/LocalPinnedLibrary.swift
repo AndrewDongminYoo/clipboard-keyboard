@@ -65,7 +65,7 @@ actor LocalPinnedLibrary: ShareFixedIDPinnedLibrary, IntentPinCommittingLibrary 
             await beforeReturningSnapshot()
             try validateLifecycle(lifecycle)
             if revision == contentRevision {
-                return state.primaryRevisions.sorted(by: newestFirst)
+                return Self.visibleRevisions(from: state).sorted(by: newestFirst)
             }
         }
         throw LocalPinnedLibraryError.snapshotChanged
@@ -89,7 +89,7 @@ actor LocalPinnedLibrary: ShareFixedIDPinnedLibrary, IntentPinCommittingLibrary 
             await beforeReturningSearch()
             try validateLifecycle(lifecycle)
             guard revision == contentRevision else { continue }
-            let revisionsByID = Dictionary(uniqueKeysWithValues: state.primaryRevisions.map { ($0.itemID, $0) })
+            let revisionsByID = Dictionary(uniqueKeysWithValues: Self.visibleRevisions(from: state).map { ($0.itemID, $0) })
             return results.compactMap { revisionsByID[$0.document.id] }
         }
         throw LocalPinnedLibraryError.snapshotChanged
@@ -156,7 +156,7 @@ actor LocalPinnedLibrary: ShareFixedIDPinnedLibrary, IntentPinCommittingLibrary 
         let result = try await store.transaction { state in
             try Task.checkCancellation()
             if state.tombstones.contains(where: { $0.itemID == itemID }) ||
-                state.conflictCopies.contains(where: { $0.revision.itemID == itemID })
+                state.conflictCopies.contains(where: { $0.sourceItemID == itemID || $0.revision.itemID == itemID })
             {
                 return SharePinEnsureResult.conflict
             }
@@ -189,7 +189,7 @@ actor LocalPinnedLibrary: ShareFixedIDPinnedLibrary, IntentPinCommittingLibrary 
         let modifiedAt = now()
         let deviceID = deviceID
         let result = try await store.transaction { state in
-            guard let current = state.primaryRevisions.first(where: { $0.itemID == itemID }) else {
+            guard let current = Self.visibleRevisions(from: state).first(where: { $0.itemID == itemID }) else {
                 throw LocalPinnedLibraryError.itemNotFound
             }
             let revision = PinnedRevision(
@@ -216,7 +216,7 @@ actor LocalPinnedLibrary: ShareFixedIDPinnedLibrary, IntentPinCommittingLibrary 
         let modifiedAt = now()
         let deviceID = deviceID
         let result = try await store.transaction { state in
-            guard let current = state.primaryRevisions.first(where: { $0.itemID == itemID }) else {
+            guard let current = Self.visibleRevisions(from: state).first(where: { $0.itemID == itemID }) else {
                 throw LocalPinnedLibraryError.itemNotFound
             }
             let tombstone = PinnedTombstone(
@@ -239,11 +239,12 @@ actor LocalPinnedLibrary: ShareFixedIDPinnedLibrary, IntentPinCommittingLibrary 
     func applyRemote(_ mutation: PinnedMutation) async throws -> MergeOutcome {
         let lifecycle = lifecycleEpoch
         let result = try await store.transaction { state in
+            let contentItemIDs = Self.contentItemIDs(for: mutation, in: state)
             var replica = PinnedReplica(state: state)
             let outcome = replica.apply(mutation)
             state = replica.state
-            if case let .tombstone(tombstone) = mutation, case .deleted = outcome {
-                Self.scrubPendingContent(for: tombstone.itemID, from: &state)
+            if case .deleted = outcome {
+                Self.scrubPendingContent(for: contentItemIDs, from: &state)
             }
             return outcome
         }
@@ -288,11 +289,12 @@ actor LocalPinnedLibrary: ShareFixedIDPinnedLibrary, IntentPinCommittingLibrary 
     }
 
     private static func applyLocal(_ mutation: PinnedMutation, to state: inout PinnedReplicaState) {
+        let contentItemIDs = contentItemIDs(for: mutation, in: state)
         var replica = PinnedReplica(state: state)
         _ = replica.apply(mutation)
         var journal = replica.state.pendingJournal
-        if case let .tombstone(tombstone) = mutation {
-            Self.scrubPendingContent(for: tombstone.itemID, from: &journal)
+        if case .tombstone = mutation {
+            Self.scrubPendingContent(for: contentItemIDs, from: &journal)
         }
         journal.enqueue(mutation)
         state = PinnedReplicaState(
@@ -306,9 +308,9 @@ actor LocalPinnedLibrary: ShareFixedIDPinnedLibrary, IntentPinCommittingLibrary 
         )
     }
 
-    private static func scrubPendingContent(for itemID: UUID, from state: inout PinnedReplicaState) {
+    private static func scrubPendingContent(for itemIDs: Set<UUID>, from state: inout PinnedReplicaState) {
         var journal = state.pendingJournal
-        scrubPendingContent(for: itemID, from: &journal)
+        scrubPendingContent(for: itemIDs, from: &journal)
         state = PinnedReplicaState(
             libraryGeneration: state.libraryGeneration,
             reset: state.reset,
@@ -320,24 +322,38 @@ actor LocalPinnedLibrary: ShareFixedIDPinnedLibrary, IntentPinCommittingLibrary 
         )
     }
 
-    private static func scrubPendingContent(for itemID: UUID, from journal: inout PendingMutationJournal) {
+    private static func scrubPendingContent(for itemIDs: Set<UUID>, from journal: inout PendingMutationJournal) {
         let mutationIDs = journal.pending.compactMap { mutation -> UUID? in
             switch mutation {
-            case let .revision(revision) where revision.itemID == itemID:
+            case let .revision(revision) where itemIDs.contains(revision.itemID):
                 revision.revisionID
-            case let .tombstone(tombstone) where tombstone.itemID == itemID:
+            case let .tombstone(tombstone) where itemIDs.contains(tombstone.itemID):
                 tombstone.tombstoneID
             case .revision, .tombstone, .reset:
                 nil
             }
         }
-        for mutationID in mutationIDs {
-            journal.acknowledge(mutationID: mutationID)
+        journal.acknowledge(mutationIDs: mutationIDs)
+    }
+
+    private static func contentItemIDs(for mutation: PinnedMutation, in state: PinnedReplicaState) -> Set<UUID> {
+        guard case let .tombstone(tombstone) = mutation else {
+            return []
         }
+        return Set(
+            [tombstone.itemID]
+                + state.conflictCopies
+                .filter { $0.sourceItemID == tombstone.itemID || $0.revision.itemID == tombstone.itemID }
+                .map(\.revision.itemID)
+        )
+    }
+
+    private static func visibleRevisions(from state: PinnedReplicaState) -> [PinnedRevision] {
+        state.primaryRevisions + state.conflictCopies.map(\.revision)
     }
 
     private static func searchDocuments(from state: PinnedReplicaState) -> [ClipSearchDocument] {
-        state.primaryRevisions.map { revision in
+        visibleRevisions(from: state).map { revision in
             ClipSearchDocument(
                 id: revision.itemID,
                 capturedAt: revision.modifiedAt,

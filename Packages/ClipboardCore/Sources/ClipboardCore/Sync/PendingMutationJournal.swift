@@ -37,7 +37,7 @@ public struct PendingMutationJournal: Codable, Equatable, Sendable {
         pending = Self.canonicalized(
             [state.reset.map(PinnedMutation.reset)].compactMap { $0 }
                 + state.primaryRevisions.map(PinnedMutation.revision)
-                + state.conflictCopies.map { PinnedMutation.revision($0.revision) }
+                + state.conflictCopies.map { PinnedMutation.revision($0.sourceRevision) }
                 + state.tombstones.map(PinnedMutation.tombstone)
         )
     }

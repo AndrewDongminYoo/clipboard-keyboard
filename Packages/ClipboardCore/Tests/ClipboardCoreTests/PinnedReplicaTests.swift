@@ -48,6 +48,45 @@ final class PinnedReplicaTests: XCTestCase {
         XCTAssertEqual(forward.state, reverse.state)
         XCTAssertEqual(forward.state.primaryRevisions, [primary])
         XCTAssertEqual(forward.state.conflictCopies, [PinnedConflictCopy(revision: losing)])
+        XCTAssertNotEqual(forward.state.conflictCopies[0].revision.itemID, itemID)
+        XCTAssertEqual(forward.state.conflictCopies[0].sourceItemID, itemID)
+        XCTAssertEqual(forward.state.conflictCopies[0].revision.payload, losing.payload)
+        XCTAssertEqual(forward.state.conflictCopies[0].revision.syncState, .conflict)
+    }
+
+    func testConflictProjectionIsDeterministicAcrossReplicaOrderAndStateRoundTrip() throws {
+        let itemID = uuid(13)
+        let losing = revision(
+            itemID: itemID,
+            revisionID: uuid(14),
+            itemGeneration: 1,
+            modifiedAt: Date(timeIntervalSince1970: 100),
+            deviceID: "device-a",
+            value: "losing"
+        )
+        let primary = revision(
+            itemID: itemID,
+            revisionID: uuid(15),
+            itemGeneration: 1,
+            modifiedAt: Date(timeIntervalSince1970: 200),
+            deviceID: "device-b",
+            value: "primary"
+        )
+        var replica = PinnedReplica()
+        _ = replica.apply(.revision(losing))
+        _ = replica.apply(.revision(primary))
+
+        let restored = try JSONDecoder().decode(
+            PinnedReplicaState.self,
+            from: JSONEncoder().encode(replica.state)
+        )
+        let projected = try XCTUnwrap(restored.conflictCopies.first)
+
+        XCTAssertEqual(restored, replica.state)
+        XCTAssertEqual(projected.sourceItemID, itemID)
+        XCTAssertNotEqual(projected.revision.itemID, itemID)
+        XCTAssertEqual(projected.revision.payload, losing.payload)
+        XCTAssertEqual(projected.syncState, .conflict)
     }
 
     func testNewerRevisionClearsPriorConflictCopies() {
@@ -70,6 +109,28 @@ final class PinnedReplicaTests: XCTestCase {
         XCTAssertEqual(replica.apply(.revision(newer)), .updated(itemID))
         XCTAssertEqual(replica.state.primaryRevisions, [newer])
         XCTAssertTrue(replica.state.conflictCopies.isEmpty)
+    }
+
+    func testTombstoneForSourceItemRemovesProjectedConflictContent() {
+        let itemID = uuid(24)
+        let first = revision(itemID: itemID, revisionID: uuid(25), itemGeneration: 1, value: "first")
+        let concurrent = revision(
+            itemID: itemID,
+            revisionID: uuid(26),
+            itemGeneration: 1,
+            modifiedAt: Date(timeIntervalSince1970: 200),
+            value: "concurrent"
+        )
+        let deletion = tombstone(itemID: itemID, tombstoneID: uuid(27), itemGeneration: 2)
+        var replica = PinnedReplica()
+        _ = replica.apply(.revision(first))
+        _ = replica.apply(.revision(concurrent))
+
+        XCTAssertFalse(replica.state.conflictCopies.isEmpty)
+        XCTAssertEqual(replica.apply(.tombstone(deletion)), .deleted(itemID))
+        XCTAssertTrue(replica.state.primaryRevisions.isEmpty)
+        XCTAssertTrue(replica.state.conflictCopies.isEmpty)
+        XCTAssertEqual(replica.state.tombstones, [deletion])
     }
 
     func testTombstoneAtSameOrHigherGenerationWinsAndOlderTombstoneIsIgnored() {

@@ -60,7 +60,12 @@ private final class MacCKSyncSession: MacCloudKitSession, @unchecked Sendable {
             )
         }
         engine.state.add(pendingRecordZoneChanges: changes)
-        try await engine.sendChanges(.init(scope: .zoneIDs([MacCloudRecordCodec.zoneID])))
+        do {
+            try await engine.sendChanges(.init(scope: .zoneIDs([MacCloudRecordCodec.zoneID])))
+        } catch {
+            await delegate.cleanupStagedAssets()
+            throw error
+        }
     }
 
     func cancel() async {
@@ -194,12 +199,14 @@ private actor MacCloudKitSyncDelegate: CKSyncEngineDelegate {
     }
 
     func replacePending(_ mutations: [PinnedMutation]) {
+        codec.cleanupAllStagedAssets()
         pendingByRecordName = Dictionary(uniqueKeysWithValues: mutations.map {
             (PinnedCloudDocument.metadata(for: $0).recordName, $0)
         })
     }
 
     func clear() {
+        codec.cleanupAllStagedAssets()
         eventHandler = nil
         pendingByRecordName.removeAll()
     }
@@ -237,11 +244,15 @@ private actor MacCloudKitSyncDelegate: CKSyncEngineDelegate {
                 await eventHandler(.fetched(mutation))
             }
         case let .sentRecordZoneChanges(changes):
+            for record in changes.savedRecords {
+                codec.cleanupStagedAsset(recordName: record.recordID.recordName)
+            }
             let ids = changes.savedRecords.compactMap { UUID(uuidString: $0.recordID.recordName) }
             if !ids.isEmpty {
                 await eventHandler(.sent(ids))
             }
             for failed in changes.failedRecordSaves {
+                codec.cleanupStagedAsset(recordName: failed.record.recordID.recordName)
                 let id = UUID(uuidString: failed.record.recordID.recordName) ?? UUID()
                 await eventHandler(.failedSave(id: id, error: failed.error))
             }
@@ -250,14 +261,25 @@ private actor MacCloudKitSyncDelegate: CKSyncEngineDelegate {
         }
     }
 
+    func cleanupStagedAssets() {
+        codec.cleanupAllStagedAssets()
+    }
+
     func nextRecordZoneChangeBatch(
         _ context: CKSyncEngine.SendChangesContext,
         syncEngine: CKSyncEngine
     ) async -> CKSyncEngine.RecordZoneChangeBatch? {
         let pending = syncEngine.state.pendingRecordZoneChanges.filter(context.options.scope.contains)
+        let eventHandler = eventHandler
         return await CKSyncEngine.RecordZoneChangeBatch(pendingChanges: pending) { [codec, pendingByRecordName] id in
             guard let mutation = pendingByRecordName[id.recordName] else { return nil }
-            return try? codec.encode(mutation)
+            do {
+                return try codec.encode(mutation)
+            } catch {
+                codec.cleanupStagedAsset(recordName: id.recordName)
+                await eventHandler?(.terminalFailure(mutation.mutationID))
+                return nil
+            }
         }
     }
 }
@@ -311,6 +333,7 @@ actor MacPinnedSyncEngine {
     private var sessionEpoch: UInt64 = 0
     private var drainTask: Task<Void, Never>?
     private var drainDirty = false
+    private var sendInProgress = false
     private var seenFetchedMutationIDs: Set<UUID> = []
     private var applyingFetchedMutationIDs: Set<UUID> = []
     private var statusObserver: (@Sendable (MacPinnedSyncStatus) async -> Void)?
@@ -472,6 +495,10 @@ actor MacPinnedSyncEngine {
 
     private func scheduleDrain() {
         guard transport != nil else { return }
+        guard !sendInProgress else {
+            drainDirty = true
+            return
+        }
         guard drainTask == nil else {
             drainDirty = true
             return
@@ -503,6 +530,18 @@ actor MacPinnedSyncEngine {
     }
 
     private func sendPending(using transport: any MacPinnedSyncTransport, epoch: UInt64) async throws {
+        guard epoch == sessionEpoch, self.transport != nil else { return }
+        guard !sendInProgress else {
+            drainDirty = true
+            return
+        }
+        sendInProgress = true
+        defer {
+            sendInProgress = false
+            if drainDirty, drainTask == nil, epoch == sessionEpoch, self.transport != nil {
+                scheduleDrain()
+            }
+        }
         let mutations = try await pendingMutations()
         guard epoch == sessionEpoch, self.transport != nil, !mutations.isEmpty else { return }
         try await transport.send(mutations)

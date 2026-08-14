@@ -57,7 +57,12 @@ private final class PhoneCKSyncSession: PhoneCloudKitSession, @unchecked Sendabl
                 zoneID: PhoneCloudRecordCodec.zoneID
             ))
         })
-        try await engine.sendChanges(.init(scope: .zoneIDs([PhoneCloudRecordCodec.zoneID])))
+        do {
+            try await engine.sendChanges(.init(scope: .zoneIDs([PhoneCloudRecordCodec.zoneID])))
+        } catch {
+            await delegate.cleanupStagedAssets()
+            throw error
+        }
     }
 
     func cancel() async {
@@ -75,8 +80,16 @@ actor PhoneCloudKitTransport: PhonePinnedSyncTransport {
     private var session: (any PhoneCloudKitSession)?
     private var generation: UInt64 = 0
 
-    init(stateStore: PhoneSyncStateStore) {
-        let delegate = PhoneCloudKitSyncDelegate(stateStore: stateStore)
+    init(
+        stateStore: PhoneSyncStateStore,
+        protectedDataAvailable: @escaping @Sendable () -> Bool
+    ) {
+        let assetStore = PhoneEncryptedAssetStore(protectedDataAvailable: protectedDataAvailable)
+        let codec = PhoneCloudRecordCodec(
+            assetStore: assetStore,
+            protectedDataAvailable: protectedDataAvailable
+        )
+        let delegate = PhoneCloudKitSyncDelegate(stateStore: stateStore, codec: codec)
         self.delegate = delegate
         resolveAccount = {
             let container = CKContainer(identifier: "iCloud.kr.donminzzi.clipboardkeyboard")
@@ -115,7 +128,7 @@ actor PhoneCloudKitTransport: PhonePinnedSyncTransport {
         resolveAccount: @escaping ResolveAccount,
         makeSession: @escaping MakeSession
     ) {
-        delegate = PhoneCloudKitSyncDelegate(stateStore: stateStore)
+        delegate = PhoneCloudKitSyncDelegate(stateStore: stateStore, codec: PhoneCloudRecordCodec())
         self.resolveAccount = resolveAccount
         self.makeSession = makeSession
     }
@@ -178,12 +191,13 @@ actor PhoneCloudKitTransport: PhonePinnedSyncTransport {
 
 private actor PhoneCloudKitSyncDelegate: CKSyncEngineDelegate {
     private let stateStore: PhoneSyncStateStore
-    private let codec = PhoneCloudRecordCodec()
+    private let codec: PhoneCloudRecordCodec
     private var eventHandler: (@Sendable (PhonePinnedSyncEvent) async -> Void)?
     private var pendingByRecordName: [String: PinnedMutation] = [:]
 
-    init(stateStore: PhoneSyncStateStore) {
+    init(stateStore: PhoneSyncStateStore, codec: PhoneCloudRecordCodec) {
         self.stateStore = stateStore
+        self.codec = codec
     }
 
     func install(eventHandler: @escaping @Sendable (PhonePinnedSyncEvent) async -> Void) {
@@ -191,12 +205,14 @@ private actor PhoneCloudKitSyncDelegate: CKSyncEngineDelegate {
     }
 
     func replacePending(_ mutations: [PinnedMutation]) {
+        codec.cleanupAllStagedAssets()
         pendingByRecordName = Dictionary(uniqueKeysWithValues: mutations.map {
             (PinnedCloudDocument.metadata(for: $0).recordName, $0)
         })
     }
 
     func clear() {
+        codec.cleanupAllStagedAssets()
         eventHandler = nil
         pendingByRecordName.removeAll()
     }
@@ -231,11 +247,15 @@ private actor PhoneCloudKitSyncDelegate: CKSyncEngineDelegate {
                 await eventHandler(.fetched(mutation))
             }
         case let .sentRecordZoneChanges(changes):
+            for record in changes.savedRecords {
+                codec.cleanupStagedAsset(recordName: record.recordID.recordName)
+            }
             let ids = changes.savedRecords.compactMap { UUID(uuidString: $0.recordID.recordName) }
             if !ids.isEmpty {
                 await eventHandler(.sent(ids))
             }
             for failed in changes.failedRecordSaves {
+                codec.cleanupStagedAsset(recordName: failed.record.recordID.recordName)
                 let id = UUID(uuidString: failed.record.recordID.recordName) ?? UUID()
                 await eventHandler(.failedSave(id: id, error: failed.error))
             }
@@ -244,14 +264,25 @@ private actor PhoneCloudKitSyncDelegate: CKSyncEngineDelegate {
         }
     }
 
+    func cleanupStagedAssets() {
+        codec.cleanupAllStagedAssets()
+    }
+
     func nextRecordZoneChangeBatch(
         _ context: CKSyncEngine.SendChangesContext,
         syncEngine: CKSyncEngine
     ) async -> CKSyncEngine.RecordZoneChangeBatch? {
         let pending = syncEngine.state.pendingRecordZoneChanges.filter(context.options.scope.contains)
+        let eventHandler = eventHandler
         return await CKSyncEngine.RecordZoneChangeBatch(pendingChanges: pending) { [codec, pendingByRecordName] id in
             guard let mutation = pendingByRecordName[id.recordName] else { return nil }
-            return try? codec.encode(mutation)
+            do {
+                return try codec.encode(mutation)
+            } catch {
+                codec.cleanupStagedAsset(recordName: id.recordName)
+                await eventHandler?(.terminalFailure(mutation.mutationID))
+                return nil
+            }
         }
     }
 }
@@ -298,6 +329,7 @@ actor PhonePinnedSyncEngine {
     private var sessionEpoch: UInt64 = 0
     private var drainTask: Task<Void, Never>?
     private var drainDirty = false
+    private var sendInProgress = false
     private var seenFetchedMutationIDs: Set<UUID> = []
     private var applyingFetchedMutationIDs: Set<UUID> = []
     private var statusObserver: (@Sendable (PhonePinnedSyncStatus) async -> Void)?
@@ -467,6 +499,10 @@ actor PhonePinnedSyncEngine {
 
     private func scheduleDrain() {
         guard transport != nil else { return }
+        guard !sendInProgress else {
+            drainDirty = true
+            return
+        }
         guard drainTask == nil else {
             drainDirty = true
             return
@@ -498,6 +534,18 @@ actor PhonePinnedSyncEngine {
     }
 
     private func sendPending(using transport: any PhonePinnedSyncTransport, epoch: UInt64) async throws {
+        guard epoch == sessionEpoch, self.transport != nil else { return }
+        guard !sendInProgress else {
+            drainDirty = true
+            return
+        }
+        sendInProgress = true
+        defer {
+            sendInProgress = false
+            if drainDirty, drainTask == nil, epoch == sessionEpoch, self.transport != nil {
+                scheduleDrain()
+            }
+        }
         let mutations = try await pendingMutations()
         guard epoch == sessionEpoch, self.transport != nil, !mutations.isEmpty else { return }
         try await transport.send(mutations)

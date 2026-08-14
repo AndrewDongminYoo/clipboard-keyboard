@@ -510,6 +510,8 @@ final class PhoneAppModel: ObservableObject {
     @Published private(set) var shareErrorMessage: String?
     @Published private(set) var syncStatus: PhonePinnedSyncStatus = .disabled
     @Published private(set) var recoveryActionInProgress = false
+    @Published private(set) var cloudDeletionStatus: CloudDeletionStatus = .idle
+    @Published private(set) var cloudDeletionInProgress = false
     @Published var syncEnabled = false {
         didSet {
             guard !isApplyingRecoveryPreference else { return }
@@ -554,6 +556,7 @@ final class PhoneAppModel: ObservableObject {
             await libraryViewModel?.load()
         }
         runtime.installSyncStatusChanged { [weak self] status in self?.syncStatus = status }
+        runtime.installCloudDeletionStatusChanged { [weak self] status in self?.cloudDeletionStatus = status }
 
         observeProtectedDataLifecycle()
         if protectedDataAvailable {
@@ -586,6 +589,14 @@ final class PhoneAppModel: ObservableObject {
         recoveryActionInProgress = true
         try? await runtime.reuploadLocalPins()
         recoveryActionInProgress = false
+    }
+
+    func deleteCloudData() async {
+        guard !cloudDeletionInProgress else { return }
+        cloudDeletionInProgress = true
+        defer { cloudDeletionInProgress = false }
+        try? await runtime.authenticateAndDeleteCloudData()
+        await libraryViewModel.load()
     }
 
     func confirmPendingShare() async {
