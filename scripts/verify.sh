@@ -27,6 +27,19 @@ run_bounded() {
 	"${runner_path}" "${timeout_seconds}" "${timeout_grace_seconds}" -- "$@"
 }
 
+ensure_apple_build_gate() {
+	if pgrep -x xcodebuild >/dev/null || pgrep -x SWBBuildService >/dev/null; then
+		echo "another Apple build is active; refusing to stack heavy jobs" >&2
+		exit 1
+	fi
+	local one_minute_load
+	one_minute_load="$(uptime | sed -E 's/.*load averages?: ([0-9.]+).*/\1/')"
+	awk -v load="${one_minute_load}" 'BEGIN { exit !(load <= 10) }' || {
+		echo "one-minute load ${one_minute_load} exceeds the Apple build gate" >&2
+		exit 1
+	}
+}
+
 ./scripts/generate-project.sh
 keyboard_open_access=""
 if ! keyboard_open_access="$(plutil -extract NSExtension.NSExtensionAttributes.RequestsOpenAccess raw -o - ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardKeyboard-Info.plist 2>/dev/null)"; then
@@ -74,7 +87,8 @@ if ! share_activation_rule_is_valid "${share_activation_rule}"; then
 	exit 1
 fi
 swift test --package-path Packages/ClipboardCore
-xcodebuild -project ClipboardKeyboard.xcodeproj -scheme ClipboardKeyboardMac -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build test
+ensure_apple_build_gate
+xcodebuild -project ClipboardKeyboard.xcodeproj -scheme ClipboardKeyboardMac -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO test
 
 simulator_ids="$(xcrun simctl list devices available | awk -F '[()]' '/^[[:space:]]+iPhone 17 Pro Max \(/ { print $2 }')"
 simulator_count="$(printf '%s\n' "${simulator_ids}" | awk 'NF { count += 1 } END { print count + 0 }')"
@@ -97,6 +111,12 @@ fi
 run_bounded "${bootstatus_timeout_seconds}" xcrun simctl bootstatus "${simulator_id}" -b
 
 simulator_destination="platform=iOS Simulator,id=${simulator_id}"
-run_bounded "${simulator_build_timeout_seconds}" xcodebuild -project ClipboardKeyboard.xcodeproj -scheme ClipboardKeyboardiOS -destination "${simulator_destination}" CODE_SIGNING_ALLOWED=NO build test
-run_bounded "${simulator_build_timeout_seconds}" xcodebuild -project ClipboardKeyboard.xcodeproj -scheme ClipboardKeyboardKeyboard -destination "${simulator_destination}" CODE_SIGNING_ALLOWED=NO build test
-run_bounded "${simulator_build_timeout_seconds}" xcodebuild -project ClipboardKeyboard.xcodeproj -scheme ClipboardKeyboardShare -destination "${simulator_destination}" CODE_SIGNING_ALLOWED=NO build test
+ensure_apple_build_gate
+run_bounded "${simulator_build_timeout_seconds}" xcodebuild -project ClipboardKeyboard.xcodeproj -scheme ClipboardKeyboardiOS -configuration Debug -destination "${simulator_destination}" CODE_SIGNING_ALLOWED=NO test
+ensure_apple_build_gate
+run_bounded "${simulator_build_timeout_seconds}" xcodebuild -project ClipboardKeyboard.xcodeproj -scheme ClipboardKeyboardKeyboard -configuration Debug -destination "${simulator_destination}" CODE_SIGNING_ALLOWED=NO test
+ensure_apple_build_gate
+run_bounded "${simulator_build_timeout_seconds}" xcodebuild -project ClipboardKeyboard.xcodeproj -scheme ClipboardKeyboardShare -configuration Debug -destination "${simulator_destination}" CODE_SIGNING_ALLOWED=NO test
+./scripts/security-audit.sh
+trunk fmt --no-fix --diff=full project.yml Config Packages Apps Extensions Tests scripts README.md docs/specs docs/plans docs/notes
+trunk check --no-fix project.yml Config Packages Apps Extensions Tests scripts README.md docs/specs docs/plans docs/notes

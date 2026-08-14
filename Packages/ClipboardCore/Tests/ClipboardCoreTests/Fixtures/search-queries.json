@@ -1,0 +1,41 @@
+{
+  "queries": [
+    {
+      "expectedRecordIDs": ["00000000-0000-5000-8000-000000001385"],
+      "name": "prompt",
+      "query": "release prompt",
+      "scope": "all"
+    },
+    {
+      "expectedRecordIDs": ["00000000-0000-5000-8000-000000001386"],
+      "name": "code",
+      "query": "exact indentation",
+      "scope": "content"
+    },
+    {
+      "expectedRecordIDs": ["00000000-0000-5000-8000-00000000137C"],
+      "name": "korean-everyday",
+      "query": "장보기 목록",
+      "scope": "content"
+    },
+    {
+      "expectedRecordIDs": ["00000000-0000-5000-8000-000000001387"],
+      "name": "unicode",
+      "query": "café 👩🏽‍💻",
+      "scope": "all"
+    },
+    {
+      "expectedRecordIDs": ["00000000-0000-5000-8000-000000001388"],
+      "name": "whitespace",
+      "query": "alpha beta gamma",
+      "scope": "content"
+    },
+    {
+      "expectedRecordIDs": [],
+      "name": "no-match",
+      "query": "fixture-query-with-no-match-7f46",
+      "scope": "all"
+    }
+  ],
+  "version": 1
+}
