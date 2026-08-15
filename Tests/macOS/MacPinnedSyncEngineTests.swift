@@ -273,9 +273,8 @@ final class MacPinnedSyncEngineTests: XCTestCase {
         try await engine.refresh()
         await fake.emit(.accountChanged)
 
-        let calls = await fake.calls
+        await waitForCalls(fake, toEqual: [.start, .fetch, .fetch, .cancel])
         let status = await engine.status
-        XCTAssertEqual(calls, [.start, .fetch, .fetch, .cancel])
         XCTAssertEqual(status, .recoveryRequired)
     }
 
@@ -290,9 +289,9 @@ final class MacPinnedSyncEngineTests: XCTestCase {
         try await engine.setEnabled(true)
         await fake.emit(.accountChanged)
 
+        await waitForCalls(fake, toEqual: [.start, .fetch, .cancel])
         var calls = await fake.calls
         var recoveryCalls = await recovery.calls
-        XCTAssertEqual(calls, [.start, .fetch, .cancel])
         XCTAssertEqual(recoveryCalls, [])
 
         await engine.keepLocalAndDisable()
@@ -971,5 +970,26 @@ private actor FakeMacSyncTransport: MacPinnedSyncTransport {
         while calls.filter({ $0 == .send }).count < expected {
             await Task.yield()
         }
+    }
+}
+
+private extension XCTestCase {
+    /// The engine defers the transport cancel out of the CKSyncEngine callback, so the
+    /// call lands after the event handler returns rather than during it. Waiting is the
+    /// point of the assertion, not a workaround for it.
+    func waitForCalls(
+        _ fake: FakeMacSyncTransport,
+        toEqual expected: [FakeMacSyncTransport.Call],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0 ..< 200 {
+            if await fake.calls == expected {
+                return
+            }
+            await Task.yield()
+        }
+        let actual = await fake.calls
+        XCTAssertEqual(actual, expected, file: file, line: line)
     }
 }
