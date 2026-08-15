@@ -6,7 +6,7 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "${repo_root}"
 
 bootstatus_timeout_seconds=300
-simulator_build_timeout_seconds=600
+simulator_build_timeout_seconds=1200
 timeout_grace_seconds=10
 runner_build_dir="$(mktemp -d "${TMPDIR:-/tmp}/clipboard-keyboard-verify-runner.XXXXXX")"
 runner_path="${runner_build_dir}/bounded-runner"
