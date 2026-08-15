@@ -24,7 +24,10 @@ struct PaletteView: View {
             // that can carry the same fact — a locked protected store sets both — so the
             // window printed "Protected Storage Locked" twice. Show the palette message
             // only when it adds something the labels do not already say.
-            if let status = model.statusMessage, !settings.statusLabels.contains(status) {
+            // Prefix rather than equality: a label can carry a parenthesised reason the
+            // palette's own message does not, as "Protected Storage Locked (keyUnavailable)"
+            // does, and those are still the same fact.
+            if let status = model.statusMessage, !settings.statusLabels.contains(where: { $0.hasPrefix(status) }) {
                 Text(status).font(.caption).foregroundStyle(.secondary)
             }
             HStack {

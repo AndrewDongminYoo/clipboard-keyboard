@@ -244,7 +244,7 @@ final class MacAppModel: ObservableObject {
                 pinnedSyncEngine: syncEngine
             )
         } catch {
-            settings.protectedStorageLocked = true
+            settings.recordProtectedStorageFailure(error)
             return MacAppModel(
                 settings: settings,
                 shortcut: shortcut,
@@ -296,7 +296,7 @@ final class MacAppModel: ObservableObject {
                     try await historyStore.save(envelope)
                     _ = try await historyStore.applyRetention(now: self?.now() ?? Date())
                 } catch {
-                    self?.settings.protectedStorageLocked = true
+                    self?.settings.recordProtectedStorageFailure(error)
                     throw error
                 }
             },
@@ -327,7 +327,7 @@ final class MacAppModel: ObservableObject {
             do {
                 _ = try await store.applyRetention(now: self?.now() ?? Date())
             } catch {
-                self?.settings.protectedStorageLocked = true
+                self?.settings.recordProtectedStorageFailure(error)
             }
         }
         configureCapture(enabled: settings.captureConsentGranted)

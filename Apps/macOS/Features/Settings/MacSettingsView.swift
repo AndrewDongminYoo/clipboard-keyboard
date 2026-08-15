@@ -107,6 +107,7 @@ final class MacSettingsModel: ObservableObject {
     @Published private(set) var retention = MacRetentionSettings(maxAgeHours: 24, maxItemCount: 200, historyEnabled: true)
     @Published private(set) var ignoredApplications: [IgnoredApplicationDisplay] = []
     @Published var protectedStorageLocked = false
+    @Published private(set) var protectedStorageFailure: String?
     @Published var syncPending = false
     @Published var syncStatus: MacPinnedSyncStatus = .disabled
     @Published private(set) var recoveryActionInProgress = false
@@ -154,8 +155,20 @@ final class MacSettingsModel: ObservableObject {
                 }
             }
         } catch {
-            protectedStorageLocked = true
+            recordProtectedStorageFailure(error)
         }
+    }
+
+    /// Production code cannot log, so a bootstrap failure used to reduce to a single
+    /// boolean and the reason was gone. Diagnosing the keychain entitlement failure that
+    /// locked this storage took a code read and an external probe because of it.
+    ///
+    /// Only `PersistenceSecurityError`'s own cases are surfaced. An arbitrary `Error`
+    /// description could carry a path or a fragment of a record, which is exactly what
+    /// the logging ban exists to keep out.
+    func recordProtectedStorageFailure(_ error: Error) {
+        protectedStorageLocked = true
+        protectedStorageFailure = (error as? PersistenceSecurityError)?.description ?? "unexpectedFailure"
     }
 
     var capturePauseSecondsRemaining: Int {
@@ -170,7 +183,10 @@ final class MacSettingsModel: ObservableObject {
             labels.append("Capture Pause Countdown")
         }
         if protectedStorageLocked {
-            labels.append("Protected Storage Locked")
+            labels.append(
+                protectedStorageFailure.map { "Protected Storage Locked (\($0))" }
+                    ?? "Protected Storage Locked"
+            )
         }
         if syncPending {
             labels.append("Sync Pending")
@@ -284,7 +300,7 @@ final class MacSettingsModel: ObservableObject {
                 paletteShortcut: paletteShortcut
             ))
         } catch {
-            protectedStorageLocked = true
+            recordProtectedStorageFailure(error)
         }
     }
 }
