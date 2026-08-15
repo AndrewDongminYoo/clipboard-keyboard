@@ -85,6 +85,24 @@ This ordering is the product's core security claim — the audit scripts exist t
 Edit `project.yml` and re-run `generate-project.sh`; expect a clean clone to have no `.xcodeproj` until you generate one.
 XcodeGen is pinned by `.xcodegen-version` and the script refuses a mismatched version.
 
+## Known traps
+
+**A wedged CoreSimulator looks like a slow build.**
+`xcodebuild test` stops after `Resolved source packages` and prints nothing further, while the process sits in `-[SimDevice(DVTAdditions) dvt_installApplicationAtPath:]` indefinitely.
+Neither the unified log nor the device's own logs record anything, so there is no error to find.
+Confirm it outside xcodebuild with `xcrun simctl install <udid> <path>.app`, which hangs identically, then clear it with `pkill -f "CoreSimulator.CoreSimulatorService"` — launchd respawns the service and no sudo is needed.
+Measured 2026-08-15: install went from an indefinite hang to 7.5 seconds, and a full `verify.sh` from over 52 minutes to 84 seconds.
+
+**`verify.sh` only ever builds Debug.**
+It runs the four scheme test bundles in Debug against concrete destinations, so the gate never compiles a Release configuration or a generic destination.
+Release-only breakage passes it unseen: `Packages/ClipboardCore/Package.swift` shipped with no `platforms:` declaration and every Release build failed on `concurrency is only available in macOS 10.15.0 or newer` while the gate stayed green.
+Build a Release archive by hand after touching `Package.swift`, `Config/*.xcconfig`, or any deployment target.
+
+**There is no asset catalog.**
+No `.xcassets` exists anywhere in the repository, so neither app has an icon.
+`xcodebuild archive` for iOS fails with `None of the input catalogs contained a matching ... "AppIcon"`, while a plain device build succeeds because actool never runs.
+TestFlight and App Store distribution stay blocked until an `AppIcon.appiconset` exists.
+
 ## Source of truth
 
 `docs/specs/2026-08-13-clipboard-keyboard-design.md` is the product and security source of truth; `docs/plans/2026-08-13-clipboard-keyboard-apple-mvp-implementation.md` is the task-by-task plan with a design-requirement traceability table.
