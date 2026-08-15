@@ -103,6 +103,15 @@ Build a Release archive by hand after touching `Package.swift`, `Config/*.xcconf
 It therefore polls for up to `apple_build_gate_wait_seconds` instead of failing on sight; a real competing build still blocks the run, it just no longer fails on its own shadow.
 The same lag applies to you: after running any `xcodebuild` by hand, wait for `pgrep -x SWBBuildService` to come back empty before starting `verify.sh`.
 
+**Every platform contract here sits behind a fake, so a green suite says nothing about it.**
+`verify.sh` passed on all five defects the first device pass turned up, and each one had a test suite standing next to it: the package declared no `platforms:` and no Release build had ever run; the icons shipped an alpha channel because assets are binary rather than source; the keyboard declared no `PrimaryLanguage` and aborted whichever app hosted it; the sync engine cancelled `CKSyncEngine` from inside that engine's own event callback, which a fake transport returns from harmlessly; and the macOS master key was never created, because `MacKeychainMasterKeyStoreTests` injects a fake `KeychainOperations` and never reaches `SecItemAdd`.
+Read the suite as pinning what someone chose to pin. A real `SecItemAdd`, a real `CKSyncEngine` callback, a Release configuration, a binary asset's attributes, and a device install are all outside it — this is [evidence-basis-discipline]'s "a gate's green is evidence only about what the gate reads", and it has now cost five separate debugging sessions in this repository alone.
+Two of the five are worth naming because they are invisible from the code: on macOS the data protection keychain needs an access group whitelisted by a provisioning profile, which a non-sandboxed app cannot have, so `kSecUseDataProtectionKeychain` fails with `errSecMissingEntitlement` (-34018) forever; and `CKSyncEngine` traps the process if you cancel it from within `handleEvent`.
+
+**Production code cannot log, so failures arrive as a single bit.**
+`security-audit.sh` bans `print`, `Logger`, and `os_log` outright, which is what keeps clipboard content out of the system log — but it also means a bootstrap failure used to reduce to `protectedStorageLocked = true` with the reason discarded, and diagnosing one took a code read plus a separately compiled probe.
+`MacSettingsModel.recordProtectedStorageFailure(_:)` is the pattern to follow when adding a failure path: surface a case from an internal error enum, never an arbitrary `Error`'s description, which can carry a path or a fragment of a record.
+
 **The two platforms' app icons follow opposite rules.**
 iOS wants a full-bleed opaque square — no alpha, no rounded corners, no outer shadow — because the system applies its own mask, and an alpha channel is rejected at submission.
 macOS wants the reverse: an 824x824 body centered in a 1024 canvas with transparent margins, an alpha channel, and a soft drop shadow, which is what Notes, Reminders, Calculator, and Maps all measure to on this machine.
