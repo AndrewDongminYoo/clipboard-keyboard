@@ -5,7 +5,7 @@
 - Approved design: 2026-08-13
 - Repository: `clipboard-keyboard`
 - Platforms: macOS and iPhone, including an iOS custom keyboard extension
-- Implementation state: design only
+- Implementation state: implemented and merged on 2026-08-15; signed and manual release gates are tracked in `docs/notes/apple-mvp-release-evidence.md`
 
 ## Product statement
 

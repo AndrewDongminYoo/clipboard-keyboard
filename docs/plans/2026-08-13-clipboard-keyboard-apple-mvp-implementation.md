@@ -3,6 +3,9 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task.
 > Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Status:** Executed and merged on 2026-08-15.
+The steps below are kept as originally written rather than ticked off, so this stays a record of what was planned; completion evidence is `docs/notes/apple-mvp-release-evidence.md`.
+
 **Goal:** Ship the approved Apple MVP as a native macOS menu bar app, native iPhone app, Full-Access-free iOS keyboard extension, and explicit Share extension that retain unpinned history only on the Mac and synchronize only user-pinned content.
 
 **Architecture:** A Foundation-only local Swift package owns immutable content models, privacy and retention policies, deterministic transformations, search, extraction, snapshot schemas, and pinned-replica state machines.
