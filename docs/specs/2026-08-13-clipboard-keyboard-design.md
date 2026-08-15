@@ -57,12 +57,12 @@ This design therefore separates transient system copying, local rotating history
 
 ### Retention classes
 
-| Class | Trigger | Persistence | Cross-device behavior |
-| --- | --- | --- | --- |
-| Ignored | Private Copy marker, confidential type, active capture pause, detected ignored application, ambiguous source, or unsupported payload | None | None |
-| System ephemeral | Ordinary system copy that the application does not accept | None in this product | macOS Universal Clipboard may transfer it under Apple's own behavior |
-| Local history | Accepted Mac copy | Encrypted local storage, default 24 hours or 200 unpinned items, whichever limit is reached first | Never written to CloudKit |
-| Pinned | Explicit Pin or explicit Shortcuts/Share action | Local durable storage until deletion | Written to the user's private CloudKit database when iCloud sync is enabled |
+| Class            | Trigger                                                                                                                              | Persistence                                                                                       | Cross-device behavior                                                       |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Ignored          | Private Copy marker, confidential type, active capture pause, detected ignored application, ambiguous source, or unsupported payload | None                                                                                              | None                                                                        |
+| System ephemeral | Ordinary system copy that the application does not accept                                                                            | None in this product                                                                              | macOS Universal Clipboard may transfer it under Apple's own behavior        |
+| Local history    | Accepted Mac copy                                                                                                                    | Encrypted local storage, default 24 hours or 200 unpinned items, whichever limit is reached first | Never written to CloudKit                                                   |
+| Pinned           | Explicit Pin or explicit Shortcuts/Share action                                                                                      | Local durable storage until deletion                                                              | Written to the user's private CloudKit database when iCloud sync is enabled |
 
 Universal Clipboard participates automatically through the general pasteboard, and Apple does not expose a macOS API for controlling that feature.
 The application therefore promises only that ignored and system-ephemeral content is absent from its database, search index, App Group cache, logs, and CloudKit writes; it does not promise an exact Universal Clipboard expiration time.
@@ -442,20 +442,20 @@ It does not ask for Full Access.
 
 ## Failure handling
 
-| Failure | Required behavior |
-| --- | --- |
-| Private Copy shortcut was not handled | No success shield; offer the visible 60-second capture pause |
-| Source is unknown or raced an app activation | Drop automatically; allow explicit Save Current Clipboard |
-| Ignored app was not reliably identified as foreground | Do not promise exclusion; confidential markers and explicit pause remain the hard controls |
-| Keychain or encrypted store unavailable | Skip capture; never persist plaintext |
-| Local database write fails | Keep system clipboard intact and show a content-free failure state |
-| Unsupported representation | Leave no metadata-only history row |
-| Full payload cannot be preserved | Skip the item; never truncate silently |
-| CloudKit is offline | Keep local pinned item usable and show pending state |
-| A pinned payload exceeds the inline CloudKit threshold | Encrypt the complete payload into a text `CKAsset`; on terminal asset failure keep it local and show `Unable to Sync Full Item`, not indefinite pending |
-| Remote delete is pending | Remove local and keyboard content immediately; retain pending tombstone |
-| CloudKit encrypted key was reset | Treat remote encrypted data as unavailable, explain recovery, and require explicit user choice before re-uploading local data |
-| Keyboard snapshot is locked, corrupt, or newer than the extension | Fail closed to an empty library and direct the user to the app |
+| Failure                                                           | Required behavior                                                                                                                                       |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Private Copy shortcut was not handled                             | No success shield; offer the visible 60-second capture pause                                                                                            |
+| Source is unknown or raced an app activation                      | Drop automatically; allow explicit Save Current Clipboard                                                                                               |
+| Ignored app was not reliably identified as foreground             | Do not promise exclusion; confidential markers and explicit pause remain the hard controls                                                              |
+| Keychain or encrypted store unavailable                           | Skip capture; never persist plaintext                                                                                                                   |
+| Local database write fails                                        | Keep system clipboard intact and show a content-free failure state                                                                                      |
+| Unsupported representation                                        | Leave no metadata-only history row                                                                                                                      |
+| Full payload cannot be preserved                                  | Skip the item; never truncate silently                                                                                                                  |
+| CloudKit is offline                                               | Keep local pinned item usable and show pending state                                                                                                    |
+| A pinned payload exceeds the inline CloudKit threshold            | Encrypt the complete payload into a text `CKAsset`; on terminal asset failure keep it local and show `Unable to Sync Full Item`, not indefinite pending |
+| Remote delete is pending                                          | Remove local and keyboard content immediately; retain pending tombstone                                                                                 |
+| CloudKit encrypted key was reset                                  | Treat remote encrypted data as unavailable, explain recovery, and require explicit user choice before re-uploading local data                           |
+| Keyboard snapshot is locked, corrupt, or newer than the extension | Fail closed to an empty library and direct the user to the app                                                                                          |
 
 Logs and crash diagnostics never contain clipboard bytes, previews, titles, search queries, extracted values, or imported filenames.
 The MVP includes no third-party analytics SDK.

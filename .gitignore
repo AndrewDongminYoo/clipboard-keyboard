@@ -1,2 +1,12 @@
 .worktrees/
 .superpowers/
+
+# Xcode and SwiftPM build output
+ClipboardKeyboard.xcodeproj/
+DerivedData/
+.build/
+xcuserdata/
+*.xcuserstate
+
+# Local signing is intentionally never tracked.
+Config/Signing.local.xcconfig

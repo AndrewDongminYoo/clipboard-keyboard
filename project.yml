@@ -1,0 +1,206 @@
+name: ClipboardKeyboard
+
+options:
+  minimumXcodeGenVersion: 2.46.0
+  deploymentTarget:
+    iOS: 17.0
+    macOS: 14.0
+
+configFiles:
+  Debug: Config/Debug.xcconfig
+  Release: Config/Release.xcconfig
+
+packages:
+  ClipboardCore:
+    path: Packages/ClipboardCore
+
+targetTemplates:
+  SharedTarget:
+    configFiles:
+      Debug: Config/Debug.xcconfig
+      Release: Config/Release.xcconfig
+    dependencies:
+      - package: ClipboardCore
+        product: ClipboardCore
+
+targets:
+  ClipboardKeyboardMac:
+    templates:
+      - SharedTarget
+    type: application
+    platform: macOS
+    sources:
+      - Apps/macOS
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Apps/macOS/ClipboardKeyboardMac.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: kr.donminzzi.clipboardkeyboard.mac
+    info:
+      path: ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardMac-Info.plist
+      properties:
+        CFBundleDisplayName: Clipboard Keyboard
+        LSUIElement: true
+        NSServices:
+          - NSKeyEquivalent:
+              default: C
+            NSMenuItem:
+              default: Private Copy
+            NSMessage: privateCopy
+            NSRequiredContext: {}
+            NSReturnTypes:
+              - public.utf8-plain-text
+              - net.daringfireball.markdown
+              - public.rtf
+              - public.html
+            NSSendTypes:
+              - public.utf8-plain-text
+              - net.daringfireball.markdown
+              - public.rtf
+              - public.html
+
+  ClipboardKeyboardiOS:
+    templates:
+      - SharedTarget
+    type: application
+    platform: iOS
+    sources:
+      - Apps/iOS
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Apps/iOS/ClipboardKeyboardiOS.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: kr.donminzzi.clipboardkeyboard.ios
+    dependencies:
+      - target: ClipboardKeyboardKeyboard
+        embed: true
+      - target: ClipboardKeyboardShare
+        embed: true
+    info:
+      path: ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardiOS-Info.plist
+      properties:
+        CFBundleDisplayName: Clipboard Keyboard
+        UTImportedTypeDeclarations:
+          - UTTypeConformsTo:
+              - public.plain-text
+            UTTypeDescription: Markdown
+            UTTypeIdentifier: net.daringfireball.markdown
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - md
+                - markdown
+              public.mime-type: text/markdown
+        UIBackgroundModes:
+          - remote-notification
+
+  ClipboardKeyboardKeyboard:
+    templates:
+      - SharedTarget
+    type: app-extension
+    platform: iOS
+    sources:
+      - Extensions/Keyboard
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Extensions/Keyboard/ClipboardKeyboardKeyboard.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: kr.donminzzi.clipboardkeyboard.ios.keyboard
+    info:
+      path: ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardKeyboard-Info.plist
+      properties:
+        CFBundleDisplayName: Clipboard Keyboard
+        NSExtension:
+          NSExtensionAttributes:
+            RequestsOpenAccess: false
+          NSExtensionPointIdentifier: com.apple.keyboard-service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).KeyboardViewController
+
+  ClipboardKeyboardShare:
+    templates:
+      - SharedTarget
+    type: app-extension
+    platform: iOS
+    sources:
+      - Extensions/Share
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Extensions/Share/ClipboardKeyboardShare.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: kr.donminzzi.clipboardkeyboard.ios.share
+    info:
+      path: ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardShare-Info.plist
+      properties:
+        CFBundleDisplayName: Clipboard Keyboard
+        NSExtension:
+          NSExtensionAttributes:
+            NSExtensionActivationRule: SUBQUERY(extensionItems, $item, $item.attachments.@count == 1 AND SUBQUERY($item.attachments, $attachment, (ANY $attachment.registeredTypeIdentifiers == "public.utf8-plain-text" OR ANY $attachment.registeredTypeIdentifiers == "public.utf16-external-plain-text" OR ANY $attachment.registeredTypeIdentifiers == "public.utf16-plain-text" OR ANY $attachment.registeredTypeIdentifiers == "public.plain-text" OR ANY $attachment.registeredTypeIdentifiers == "public.url") AND NOT (ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.file-url") AND NOT (ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.image")).@count == 1).@count == 1 AND SUBQUERY(extensionItems, $item, $item.attachments.@count > 0).@count == 1
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+
+  ClipboardKeyboardMacTests:
+    templates:
+      - SharedTarget
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/macOS
+    dependencies:
+      - target: ClipboardKeyboardMac
+
+  ClipboardKeyboardiOSTests:
+    templates:
+      - SharedTarget
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/iOS
+    dependencies:
+      - target: ClipboardKeyboardiOS
+
+  ClipboardKeyboardKeyboardTests:
+    templates:
+      - SharedTarget
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/Keyboard
+      - Extensions/Keyboard
+    dependencies:
+      - target: ClipboardKeyboardKeyboard
+
+  ClipboardKeyboardShareTests:
+    templates:
+      - SharedTarget
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/Share
+      - Extensions/Share
+    dependencies:
+      - target: ClipboardKeyboardShare
+
+schemes:
+  ClipboardKeyboardMac:
+    build:
+      targets:
+        ClipboardKeyboardMac: all
+    test:
+      targets:
+        - ClipboardKeyboardMacTests
+  ClipboardKeyboardiOS:
+    build:
+      targets:
+        ClipboardKeyboardiOS: all
+    test:
+      targets:
+        - ClipboardKeyboardiOSTests
+  ClipboardKeyboardKeyboard:
+    build:
+      targets:
+        ClipboardKeyboardKeyboard: all
+    test:
+      targets:
+        - ClipboardKeyboardKeyboardTests
+  ClipboardKeyboardShare:
+    build:
+      targets:
+        ClipboardKeyboardShare: all
+    test:
+      targets:
+        - ClipboardKeyboardShareTests
