@@ -103,10 +103,12 @@ Build a Release archive by hand after touching `Package.swift`, `Config/*.xcconf
 It therefore polls for up to `apple_build_gate_wait_seconds` instead of failing on sight; a real competing build still blocks the run, it just no longer fails on its own shadow.
 The same lag applies to you: after running any `xcodebuild` by hand, wait for `pgrep -x SWBBuildService` to come back empty before starting `verify.sh`.
 
-**There is no asset catalog.**
-No `.xcassets` exists anywhere in the repository, so neither app has an icon.
-`xcodebuild archive` for iOS fails with `None of the input catalogs contained a matching ... "AppIcon"`, while a plain device build succeeds because actool never runs.
-TestFlight and App Store distribution stay blocked until an `AppIcon.appiconset` exists.
+**The two platforms' app icons follow opposite rules.**
+iOS wants a full-bleed opaque square — no alpha, no rounded corners, no outer shadow — because the system applies its own mask, and an alpha channel is rejected at submission.
+macOS wants the reverse: an 824x824 body centered in a 1024 canvas with transparent margins, an alpha channel, and a soft drop shadow, which is what Notes, Reminders, Calculator, and Maps all measure to on this machine.
+Reusing the iOS artwork for `Apps/macOS` renders oversized and square-cornered in the Dock.
+The iOS set carries the `iphone` and `ios-marketing` idioms only; restoring an `ipad` idiom also means changing `TARGETED_DEVICE_FAMILY`, which every iOS target pins to `1`.
+Do not hand-add an `.icns` — actool builds one from the macOS PNGs and emplaces it during the build.
 
 ## Source of truth
 
