@@ -98,6 +98,11 @@ It runs the four scheme test bundles in Debug against concrete destinations, so 
 Release-only breakage passes it unseen: `Packages/ClipboardCore/Package.swift` shipped with no `platforms:` declaration and every Release build failed on `concurrency is only available in macOS 10.15.0 or newer` while the gate stayed green.
 Build a Release archive by hand after touching `Package.swift`, `Config/*.xcconfig`, or any deployment target.
 
+**The build gate races the build service this script itself starts.**
+`ensure_apple_build_gate` refuses to run when `SWBBuildService` is alive, but every `xcodebuild` stage leaves that service resident for a while after it finishes, so a later stage in the same run can trip on the service an earlier stage just used.
+It therefore polls for up to `apple_build_gate_wait_seconds` instead of failing on sight; a real competing build still blocks the run, it just no longer fails on its own shadow.
+The same lag applies to you: after running any `xcodebuild` by hand, wait for `pgrep -x SWBBuildService` to come back empty before starting `verify.sh`.
+
 **There is no asset catalog.**
 No `.xcassets` exists anywhere in the repository, so neither app has an icon.
 `xcodebuild archive` for iOS fails with `None of the input catalogs contained a matching ... "AppIcon"`, while a plain device build succeeds because actool never runs.
