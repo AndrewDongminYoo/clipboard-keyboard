@@ -97,12 +97,18 @@ struct MacKeychainMasterKeyStore: MasterKeyProviding {
         return SymmetricKey(data: generatedData)
     }
 
+    /// Deliberately not `kSecUseDataProtectionKeychain`. That keychain enforces access
+    /// through a keychain access group, which on macOS has to be whitelisted by a
+    /// provisioning profile — something macOS does not support for a non-sandboxed app,
+    /// so neither does Xcode. Every SecItemAdd here returned errSecMissingEntitlement
+    /// (-34018), the master key was never created, and the app reported "Protected
+    /// Storage Locked" on every launch. The file-based keychain needs no entitlement and
+    /// ties access to the login keychain being unlocked.
     private var baseQuery: [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.service,
             kSecAttrAccount as String: "master-key",
-            kSecUseDataProtectionKeychain as String: true,
         ]
     }
 
