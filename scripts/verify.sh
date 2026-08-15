@@ -118,5 +118,5 @@ run_bounded "${simulator_build_timeout_seconds}" xcodebuild -project ClipboardKe
 ensure_apple_build_gate
 run_bounded "${simulator_build_timeout_seconds}" xcodebuild -project ClipboardKeyboard.xcodeproj -scheme ClipboardKeyboardShare -configuration Debug -destination "${simulator_destination}" CODE_SIGNING_ALLOWED=NO test
 ./scripts/security-audit.sh
-trunk fmt --no-fix --diff=full project.yml Config Packages Apps Extensions Tests scripts README.md docs/specs docs/plans docs/notes
-trunk check --no-fix project.yml Config Packages Apps Extensions Tests scripts README.md docs/specs docs/plans docs/notes
+trunk fmt --no-fix --diff=full project.yml Config Packages Apps Extensions Tests scripts README.md CLAUDE.md docs/specs docs/plans docs/notes
+trunk check --no-fix project.yml Config Packages Apps Extensions Tests scripts README.md CLAUDE.md docs/specs docs/plans docs/notes
