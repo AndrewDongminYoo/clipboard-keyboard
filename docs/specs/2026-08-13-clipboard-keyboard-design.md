@@ -265,6 +265,10 @@ If another application consumes the shortcut or does not support Services, the a
 The secure menu bar fallback is `Pause Capture for 60 Seconds`.
 It shows a visible countdown, drops every pasteboard change during the interval, allows early manual resume, and never treats an uncorrelated ownership change as the intended private copy.
 
+A one-shot control that skips only the next pasteboard change was considered and rejected as unreliable.
+Such a control has to identify one specific future change as the intended one, and this design already establishes that the watcher cannot make that identification: an activation event can race the pasteboard change, and a background helper can write while a different application appears foreground.
+The next change is therefore not reliably the change the user meant to shield, so the fixed interval is used instead because discarding every change it covers requires no identification at all.
+
 Private Copy does not disable Apple's Universal Clipboard and does not erase the system pasteboard.
 
 ## Content model
