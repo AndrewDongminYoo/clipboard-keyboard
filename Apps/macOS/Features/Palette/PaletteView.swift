@@ -20,7 +20,11 @@ struct PaletteView: View {
             if !settings.statusLabels.isEmpty {
                 Text(settings.statusLabels.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
             }
-            if let status = model.statusMessage {
+            // The palette's own status and the settings labels are separate state paths
+            // that can carry the same fact — a locked protected store sets both — so the
+            // window printed "Protected Storage Locked" twice. Show the palette message
+            // only when it adds something the labels do not already say.
+            if let status = model.statusMessage, !settings.statusLabels.contains(status) {
                 Text(status).font(.caption).foregroundStyle(.secondary)
             }
             HStack {
