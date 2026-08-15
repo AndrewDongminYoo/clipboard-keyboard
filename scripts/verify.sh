@@ -72,6 +72,21 @@ if [[ ${keyboard_open_access} != "false" ]]; then
 	exit 1
 fi
 
+# PrimaryLanguage is what the system resolves an input mode's language from.
+# Without it, TIGetDefaultDictationLanguagesForKeyboardLanguage inserts a nil
+# into a dictionary and throws inside the HOST application, so the host aborts
+# the moment the keyboard is selected and this extension leaves no crash report
+# of its own. Observed against KakaoTalk on 2026-08-15.
+keyboard_primary_language=""
+if ! keyboard_primary_language="$(plutil -extract NSExtension.NSExtensionAttributes.PrimaryLanguage raw -o - ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardKeyboard-Info.plist 2>/dev/null)"; then
+	echo "keyboard generated plist contract failed: PrimaryLanguage is missing" >&2
+	exit 1
+fi
+if [[ -z ${keyboard_primary_language} ]]; then
+	echo "keyboard generated plist contract failed: PrimaryLanguage is empty" >&2
+	exit 1
+fi
+
 share_activation_rule=""
 if ! share_activation_rule="$(plutil -extract NSExtension.NSExtensionAttributes.NSExtensionActivationRule raw -o - ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardShare-Info.plist 2>/dev/null)"; then
 	echo "share generated plist contract failed" >&2
