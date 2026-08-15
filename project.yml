@@ -69,6 +69,7 @@ targets:
       base:
         CODE_SIGN_ENTITLEMENTS: Apps/iOS/ClipboardKeyboardiOS.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: kr.donminzzi.clipboardkeyboard.ios
+        TARGETED_DEVICE_FAMILY: "1"
     dependencies:
       - target: ClipboardKeyboardKeyboard
         embed: true
@@ -102,6 +103,7 @@ targets:
       base:
         CODE_SIGN_ENTITLEMENTS: Extensions/Keyboard/ClipboardKeyboardKeyboard.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: kr.donminzzi.clipboardkeyboard.ios.keyboard
+        TARGETED_DEVICE_FAMILY: "1"
     info:
       path: ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardKeyboard-Info.plist
       properties:
@@ -123,6 +125,7 @@ targets:
       base:
         CODE_SIGN_ENTITLEMENTS: Extensions/Share/ClipboardKeyboardShare.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: kr.donminzzi.clipboardkeyboard.ios.share
+        TARGETED_DEVICE_FAMILY: "1"
     info:
       path: ClipboardKeyboard.xcodeproj/Generated/ClipboardKeyboardShare-Info.plist
       properties:
