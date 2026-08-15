@@ -85,6 +85,31 @@ This ordering is the product's core security claim — the audit scripts exist t
 Edit `project.yml` and re-run `generate-project.sh`; expect a clean clone to have no `.xcodeproj` until you generate one.
 XcodeGen is pinned by `.xcodegen-version` and the script refuses a mismatched version.
 
+## Known traps
+
+**A wedged CoreSimulator looks like a slow build.**
+`xcodebuild test` stops after `Resolved source packages` and prints nothing further, while the process sits in `-[SimDevice(DVTAdditions) dvt_installApplicationAtPath:]` indefinitely.
+Neither the unified log nor the device's own logs record anything, so there is no error to find.
+Confirm it outside xcodebuild with `xcrun simctl install <udid> <path>.app`, which hangs identically, then clear it with `pkill -f "CoreSimulator.CoreSimulatorService"` — launchd respawns the service and no sudo is needed.
+Measured 2026-08-15: install went from an indefinite hang to 7.5 seconds, and a full `verify.sh` from over 52 minutes to 84 seconds.
+
+**`verify.sh` only ever builds Debug.**
+It runs the four scheme test bundles in Debug against concrete destinations, so the gate never compiles a Release configuration or a generic destination.
+Release-only breakage passes it unseen: `Packages/ClipboardCore/Package.swift` shipped with no `platforms:` declaration and every Release build failed on `concurrency is only available in macOS 10.15.0 or newer` while the gate stayed green.
+Build a Release archive by hand after touching `Package.swift`, `Config/*.xcconfig`, or any deployment target.
+
+**The build gate races the build service this script itself starts.**
+`ensure_apple_build_gate` refuses to run when `SWBBuildService` is alive, but every `xcodebuild` stage leaves that service resident for a while after it finishes, so a later stage in the same run can trip on the service an earlier stage just used.
+It therefore polls for up to `apple_build_gate_wait_seconds` instead of failing on sight; a real competing build still blocks the run, it just no longer fails on its own shadow.
+The same lag applies to you: after running any `xcodebuild` by hand, wait for `pgrep -x SWBBuildService` to come back empty before starting `verify.sh`.
+
+**The two platforms' app icons follow opposite rules.**
+iOS wants a full-bleed opaque square — no alpha, no rounded corners, no outer shadow — because the system applies its own mask, and an alpha channel is rejected at submission.
+macOS wants the reverse: an 824x824 body centered in a 1024 canvas with transparent margins, an alpha channel, and a soft drop shadow, which is what Notes, Reminders, Calculator, and Maps all measure to on this machine.
+Reusing the iOS artwork for `Apps/macOS` renders oversized and square-cornered in the Dock.
+The iOS set carries the `iphone` and `ios-marketing` idioms only; restoring an `ipad` idiom also means changing `TARGETED_DEVICE_FAMILY`, which every iOS target pins to `1`.
+Do not hand-add an `.icns` — actool builds one from the macOS PNGs and emplaces it during the build.
+
 ## Source of truth
 
 `docs/specs/2026-08-13-clipboard-keyboard-design.md` is the product and security source of truth; `docs/plans/2026-08-13-clipboard-keyboard-apple-mvp-implementation.md` is the task-by-task plan with a design-requirement traceability table.

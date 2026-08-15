@@ -6,8 +6,10 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "${repo_root}"
 
 bootstatus_timeout_seconds=300
-simulator_build_timeout_seconds=600
+simulator_build_timeout_seconds=1200
 timeout_grace_seconds=10
+apple_build_gate_wait_seconds=180
+apple_build_gate_poll_seconds=5
 runner_build_dir="$(mktemp -d "${TMPDIR:-/tmp}/clipboard-keyboard-verify-runner.XXXXXX")"
 runner_path="${runner_build_dir}/bounded-runner"
 
@@ -27,17 +29,36 @@ run_bounded() {
 	"${runner_path}" "${timeout_seconds}" "${timeout_grace_seconds}" -- "$@"
 }
 
-ensure_apple_build_gate() {
+apple_build_gate_blocker() {
 	if pgrep -x xcodebuild >/dev/null || pgrep -x SWBBuildService >/dev/null; then
-		echo "another Apple build is active; refusing to stack heavy jobs" >&2
-		exit 1
+		echo "another Apple build is active"
+		return
 	fi
 	local one_minute_load
 	one_minute_load="$(uptime | sed -E 's/.*load averages?: ([0-9.]+).*/\1/')"
-	awk -v load="${one_minute_load}" 'BEGIN { exit !(load <= 10) }' || {
-		echo "one-minute load ${one_minute_load} exceeds the Apple build gate" >&2
-		exit 1
-	}
+	if ! awk -v load="${one_minute_load}" 'BEGIN { exit !(load <= 10) }'; then
+		echo "one-minute load ${one_minute_load} exceeds the Apple build gate"
+	fi
+}
+
+# Waits rather than failing immediately: this script runs several xcodebuild
+# stages in a row and each one leaves SWBBuildService resident for a while, so
+# the next stage's gate would otherwise trip on the service this script itself
+# just used.
+ensure_apple_build_gate() {
+	local deadline=$((SECONDS + apple_build_gate_wait_seconds))
+	local blocker
+	while :; do
+		blocker="$(apple_build_gate_blocker)"
+		if [[ -z ${blocker} ]]; then
+			return 0
+		fi
+		if ((SECONDS >= deadline)); then
+			echo "${blocker}; still blocked after ${apple_build_gate_wait_seconds}s" >&2
+			exit 1
+		fi
+		sleep "${apple_build_gate_poll_seconds}"
+	done
 }
 
 ./scripts/generate-project.sh

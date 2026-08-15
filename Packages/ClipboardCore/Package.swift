@@ -3,6 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "ClipboardCore",
+    platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
         .library(name: "ClipboardCore", targets: ["ClipboardCore"]),
     ],
