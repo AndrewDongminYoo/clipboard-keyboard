@@ -626,9 +626,16 @@ actor PhonePinnedSyncEngine {
     /// cancel at all. Bumping the epoch, clearing `transport`, and clearing the delegate
     /// already fence off every later event, and none of them re-enter CKSyncEngine.
     ///
-    /// The accepted cost: the old CKSyncEngine keeps its in-flight operations until it
-    /// deallocates. They target an account that has just gone away, and no event they
-    /// produce can reach us once the delegate is cleared.
+    /// What actually stops the released engine re-uploading is `delegate.clear()`, which
+    /// `releaseWithoutCancelling()` awaits before this returns: it empties the pending
+    /// record names and deletes the staged assets, and `nextRecordZoneChangeBatch`
+    /// captures that dictionary by value, so every later batch resolves no records.
+    /// Do not justify this by the account being gone — `.encryptedDataReset` also arrives
+    /// as `.accountChanged`, with the account still signed in. Re-upload after recovery is
+    /// gated by the user's explicit choice on a fresh transport, never by this teardown.
+    ///
+    /// The accepted cost: a batch already handed to CKSyncEngine may still complete.
+    /// `cancelOperations()` was only ever best-effort against that.
     private func stopTransport(with newStatus: PhonePinnedSyncStatus, insideEventCallback: Bool = false) async {
         let oldTransport = transport
         sessionEpoch &+= 1
