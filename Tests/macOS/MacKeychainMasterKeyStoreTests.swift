@@ -58,7 +58,10 @@ final class MacKeychainMasterKeyStoreTests: XCTestCase {
         XCTAssertEqual(query[kSecClass as String] as? String, kSecClassGenericPassword as String)
         XCTAssertEqual(query[kSecAttrService as String] as? String, "kr.donminzzi.clipboardkeyboard.master-key.mac")
         XCTAssertEqual(query[kSecAttrAccount as String] as? String, "master-key")
-        XCTAssertEqual(query[kSecUseDataProtectionKeychain as String] as? Bool, true)
+        // The data protection keychain needs a keychain access group whitelisted by a
+        // provisioning profile, which macOS does not offer a non-sandboxed app, so every
+        // add returned errSecMissingEntitlement and the master key never existed.
+        XCTAssertNil(query[kSecUseDataProtectionKeychain as String])
         XCTAssertEqual(query[kSecReturnData as String] as? Bool, true)
         XCTAssertEqual(query[kSecMatchLimit as String] as? String, kSecMatchLimitOne as String)
     }
@@ -67,7 +70,7 @@ final class MacKeychainMasterKeyStoreTests: XCTestCase {
         XCTAssertEqual(attributes[kSecClass as String] as? String, kSecClassGenericPassword as String)
         XCTAssertEqual(attributes[kSecAttrService as String] as? String, "kr.donminzzi.clipboardkeyboard.master-key.mac")
         XCTAssertEqual(attributes[kSecAttrAccount as String] as? String, "master-key")
-        XCTAssertEqual(attributes[kSecUseDataProtectionKeychain as String] as? Bool, true)
+        XCTAssertNil(attributes[kSecUseDataProtectionKeychain as String])
         XCTAssertEqual(attributes[kSecAttrAccessible as String] as? String, kSecAttrAccessibleWhenUnlocked as String)
         XCTAssertEqual(attributes[kSecValueData as String] as? Data, expectedValue)
         XCTAssertEqual(expectedValue.count, 32)

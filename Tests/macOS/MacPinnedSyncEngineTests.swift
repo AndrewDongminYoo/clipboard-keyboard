@@ -273,10 +273,31 @@ final class MacPinnedSyncEngineTests: XCTestCase {
         try await engine.refresh()
         await fake.emit(.accountChanged)
 
+        // Asserted without waiting: the teardown must complete before the event callback
+        // returns, and it must never cancel the transport from inside that callback.
         let calls = await fake.calls
+        XCTAssertEqual(calls, [.start, .fetch, .fetch, .release])
         let status = await engine.status
-        XCTAssertEqual(calls, [.start, .fetch, .fetch, .cancel])
         XCTAssertEqual(status, .recoveryRequired)
+    }
+
+    /// Cancelling re-enters CKSyncEngine, and doing that while it is delivering an event
+    /// traps the process. Deferring the cancel into a `Task` does not order it after the
+    /// callback returns, so every callback-driven teardown must release the transport
+    /// without ever cancelling it. Absence of `.cancel` is the property a fake can prove;
+    /// ordering is not, which is why this asserts the call list rather than a timing.
+    func testCallbackDrivenTeardownNeverCancelsTheTransport() async throws {
+        for event in [MacPinnedSyncEvent.accountUnavailable, .accountChanged] {
+            let fake = FakeMacSyncTransport()
+            let engine = MacPinnedSyncEngine(makeTransport: { fake })
+            try await engine.setEnabled(true)
+
+            await fake.emit(event)
+
+            let calls = await fake.calls
+            XCTAssertEqual(calls, [.start, .fetch, .release])
+            XCTAssertFalse(calls.contains(.cancel))
+        }
     }
 
     func testRecoveryRequiresExplicitChoiceAndKeepLocalDoesNotRewriteOrRestart() async throws {
@@ -291,8 +312,8 @@ final class MacPinnedSyncEngineTests: XCTestCase {
         await fake.emit(.accountChanged)
 
         var calls = await fake.calls
+        XCTAssertEqual(calls, [.start, .fetch, .release])
         var recoveryCalls = await recovery.calls
-        XCTAssertEqual(calls, [.start, .fetch, .cancel])
         XCTAssertEqual(recoveryCalls, [])
 
         await engine.keepLocalAndDisable()
@@ -300,7 +321,7 @@ final class MacPinnedSyncEngineTests: XCTestCase {
         calls = await fake.calls
         recoveryCalls = await recovery.calls
         let status = await engine.status
-        XCTAssertEqual(calls, [.start, .fetch, .cancel])
+        XCTAssertEqual(calls, [.start, .fetch, .release])
         XCTAssertEqual(recoveryCalls, [])
         XCTAssertEqual(status, .disabled)
     }
@@ -358,7 +379,7 @@ final class MacPinnedSyncEngineTests: XCTestCase {
         let calls = await fake.calls
         let recoveryCalls = await recovery.calls
         let status = await engine.status
-        XCTAssertEqual(calls, [.start, .fetch, .cancel])
+        XCTAssertEqual(calls, [.start, .fetch, .release])
         XCTAssertEqual(recoveryCalls, ["requeue"])
         XCTAssertEqual(status, .disabled)
     }
@@ -902,7 +923,7 @@ private actor PendingLookupMacBox {
 }
 
 private actor FakeMacSyncTransport: MacPinnedSyncTransport {
-    enum Call: Equatable { case start, fetch, send, cancel }
+    enum Call: Equatable { case start, fetch, send, cancel, release }
     private(set) var calls: [Call] = []
     private(set) var sentBatches: [[PinnedMutation]] = []
     private var handler: (@Sendable (MacPinnedSyncEvent) async -> Void)?
@@ -961,6 +982,10 @@ private actor FakeMacSyncTransport: MacPinnedSyncTransport {
 
     func cancel() async {
         calls.append(.cancel)
+    }
+
+    func releaseWithoutCancelling() async {
+        calls.append(.release)
     }
 
     func emit(_ event: MacPinnedSyncEvent) async {

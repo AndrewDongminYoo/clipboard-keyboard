@@ -326,6 +326,26 @@ final class PhonePinnedSyncEngineTests: XCTestCase {
         XCTAssertEqual(sendCount, 0)
     }
 
+    /// Cancelling re-enters CKSyncEngine, and doing that while it is delivering an event
+    /// traps the process. Deferring the cancel into a `Task` does not order it after the
+    /// callback returns, so every callback-driven teardown must release the transport
+    /// without ever cancelling it. Absence of a cancel is the property a fake can prove;
+    /// ordering is not, which is why this asserts the counts rather than a timing.
+    func testCallbackDrivenTeardownNeverCancelsTheTransport() async throws {
+        for event in [PhonePinnedSyncEvent.accountUnavailable, .accountChanged] {
+            let fake = FakePhoneSyncTransport()
+            let engine = PhonePinnedSyncEngine(makeTransport: { fake })
+            try await engine.setEnabled(true)
+
+            await fake.emit(event)
+
+            let cancelCount = await fake.cancelCount
+            let releaseCount = await fake.releaseCount
+            XCTAssertEqual(cancelCount, 0)
+            XCTAssertEqual(releaseCount, 1)
+        }
+    }
+
     func testRecoveryRequiresExplicitChoiceAndKeepLocalDoesNotRewriteOrRestart() async throws {
         let fake = FakePhoneSyncTransport()
         let recovery = PhoneRecoveryCallBox()
@@ -688,6 +708,7 @@ private actor FakePhoneSyncTransport: PhonePinnedSyncTransport {
     private(set) var sendCount = 0
     private(set) var sentBatches: [[PinnedMutation]] = []
     private(set) var cancelCount = 0
+    private(set) var releaseCount = 0
     private let sendBarrier: PhoneSendBarrier?
     private let onSend: (@Sendable (Int) -> Void)?
     private let onStart: @Sendable () async -> Void
@@ -748,6 +769,10 @@ private actor FakePhoneSyncTransport: PhonePinnedSyncTransport {
 
     func cancel() async {
         cancelCount += 1
+    }
+
+    func releaseWithoutCancelling() async {
+        releaseCount += 1
     }
 
     func emit(_ event: PhonePinnedSyncEvent) async {

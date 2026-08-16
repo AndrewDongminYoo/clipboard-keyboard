@@ -178,6 +178,12 @@ actor PhoneCloudKitTransport: PhonePinnedSyncTransport {
         await delegate.clear()
     }
 
+    func releaseWithoutCancelling() async {
+        generation &+= 1
+        session = nil
+        await delegate.clear()
+    }
+
     private static func mapTransportError(_ error: Error) -> Error {
         guard let cloudError = error as? CKError else { return error }
         switch cloudError.code {
@@ -229,7 +235,15 @@ private actor PhoneCloudKitSyncDelegate: CKSyncEngineDelegate {
             switch change.changeType {
             case .signOut:
                 await eventHandler(.accountUnavailable)
-            case .signIn, .switchAccounts:
+            case .signIn:
+                // The engine reports the signed-in account as soon as a session starts,
+                // so this is the expected steady state rather than a change to recover
+                // from. Mapping it to .accountChanged tore down the session that had
+                // just been established, which crashed the app on every launch while
+                // sync was enabled. Recovery belongs to .switchAccounts, which is the
+                // case CloudKit itself pairs with deleting local data.
+                break
+            case .switchAccounts:
                 await eventHandler(.accountChanged)
             @unknown default:
                 await eventHandler(.accountChanged)
@@ -315,6 +329,9 @@ protocol PhonePinnedSyncTransport: Sendable {
     func fetch() async throws
     func send(_ mutations: [PinnedMutation]) async throws
     func cancel() async
+    /// Drops the session without cancelling it, for the one path that runs inside a
+    /// CKSyncEngine event callback. See `PhonePinnedSyncEngine.stopTransport(with:insideEventCallback:)`.
+    func releaseWithoutCancelling() async
 }
 
 actor PhonePinnedSyncEngine {
@@ -588,9 +605,9 @@ actor PhonePinnedSyncEngine {
             case .retryableFailure: await updateStatus(.pending)
             case .terminalFailure: await updateStatus(.unableToSyncFullItem)
             case .accountUnavailable:
-                await stopTransport(with: .accountUnavailable)
+                await stopTransport(with: .accountUnavailable, insideEventCallback: true)
             case .accountChanged:
-                await stopTransport(with: .recoveryRequired)
+                await stopTransport(with: .recoveryRequired, insideEventCallback: true)
             }
         } catch {
             guard epoch == sessionEpoch, transport != nil else { return }
@@ -598,7 +615,28 @@ actor PhonePinnedSyncEngine {
         }
     }
 
-    private func stopTransport(with newStatus: PhonePinnedSyncStatus) async {
+    /// `insideEventCallback` must be true whenever this runs inside a transport event
+    /// callback. Cancelling re-enters CKSyncEngine, and doing that while it is delivering
+    /// an event trips a CloudKit assertion and traps the process.
+    ///
+    /// Deferring the cancel into an unstructured `Task` does not avoid that: the task
+    /// inherits this actor and becomes runnable the moment the actor next suspends, which
+    /// happens while the delegate's `handleEvent` is still unwound. Nothing in Swift
+    /// orders a task after a callback frame the caller owns, so on this path we do not
+    /// cancel at all. Bumping the epoch, clearing `transport`, and clearing the delegate
+    /// already fence off every later event, and none of them re-enter CKSyncEngine.
+    ///
+    /// What actually stops the released engine re-uploading is `delegate.clear()`, which
+    /// `releaseWithoutCancelling()` awaits before this returns: it empties the pending
+    /// record names and deletes the staged assets, and `nextRecordZoneChangeBatch`
+    /// captures that dictionary by value, so every later batch resolves no records.
+    /// Do not justify this by the account being gone — `.encryptedDataReset` also arrives
+    /// as `.accountChanged`, with the account still signed in. Re-upload after recovery is
+    /// gated by the user's explicit choice on a fresh transport, never by this teardown.
+    ///
+    /// The accepted cost: a batch already handed to CKSyncEngine may still complete.
+    /// `cancelOperations()` was only ever best-effort against that.
+    private func stopTransport(with newStatus: PhonePinnedSyncStatus, insideEventCallback: Bool = false) async {
         let oldTransport = transport
         sessionEpoch &+= 1
         transport = nil
@@ -610,7 +648,11 @@ actor PhonePinnedSyncEngine {
         recoveryInProgress = false
         recoveryIncidentEpoch = newStatus == .recoveryRequired ? sessionEpoch : nil
         await updateStatus(newStatus)
-        await oldTransport?.cancel()
+        if insideEventCallback {
+            await oldTransport?.releaseWithoutCancelling()
+        } else {
+            await oldTransport?.cancel()
+        }
         await waitForEventOperationsToFinish()
     }
 

@@ -366,4 +366,5 @@ private actor ForbiddenCloudWriteTransport: MacPinnedSyncTransport {
     }
 
     func cancel() async {}
+    func releaseWithoutCancelling() async {}
 }

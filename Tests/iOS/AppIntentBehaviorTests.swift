@@ -783,6 +783,8 @@ private actor IntentPhoneSyncTransport: PhonePinnedSyncTransport {
         onCancel()
     }
 
+    func releaseWithoutCancelling() async {}
+
     func waitUntilStartCount(_ expected: Int) async {
         while startCount < expected {
             await Task.yield()

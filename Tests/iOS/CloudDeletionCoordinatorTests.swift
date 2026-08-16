@@ -332,6 +332,7 @@ private actor CloudDeletionTransport: PhonePinnedSyncTransport {
     func fetch() async throws {}
     func send(_: [PinnedMutation]) async throws {}
     func cancel() async {}
+    func releaseWithoutCancelling() async {}
 }
 
 private actor CloudDeletionBarrier {

@@ -75,6 +75,26 @@ final class MacSettingsTests: XCTestCase {
         XCTAssertEqual(reconciledValues, [false, false])
     }
 
+    func testProtectedStorageFailureNamesItsReasonInTheStatusLabel() {
+        let settings = MacSettingsModel(store: MemoryMacSettingsStore())
+
+        settings.recordProtectedStorageFailure(PersistenceSecurityError.keyUnavailable)
+
+        XCTAssertTrue(settings.protectedStorageLocked)
+        XCTAssertEqual(settings.statusLabels, ["Protected Storage Locked (keyUnavailable)"])
+    }
+
+    func testProtectedStorageFailureNeverSurfacesAnUnknownErrorDescription() {
+        struct LeakyError: Error, CustomStringConvertible {
+            let description = "/Users/someone/Library/Application Support/ClipboardKeyboard/History/secret"
+        }
+        let settings = MacSettingsModel(store: MemoryMacSettingsStore())
+
+        settings.recordProtectedStorageFailure(LeakyError())
+
+        XCTAssertEqual(settings.statusLabels, ["Protected Storage Locked (unexpectedFailure)"])
+    }
+
     func testPrivacyAndSyncDefaultsAreOffAndRetentionIsBounded() {
         let settings = MacSettingsModel(store: MemoryMacSettingsStore())
 
