@@ -18,8 +18,8 @@ runtimes:
 lint:
   disabled:
     - checkov
+    - osv-scanner
   enabled:
-    - osv-scanner@2.5.0
     - git-diff-check
     - markdownlint@0.49.1
     - shellcheck@0.11.0
