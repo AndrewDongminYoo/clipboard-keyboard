@@ -101,4 +101,4 @@ One class never implies another.
 ## Release Decision
 
 The unsigned automated layer does not authorize publishing or release.
-Release remains \[PARTIAL\] until every required signed/manual row is either observed with concrete evidence or explicitly accepted as a release gap by the operator.
+Release remains \[PARTIAL\] until every required signed/manual row is either observed with concrete evidence or explicitly accepted as a release gap.

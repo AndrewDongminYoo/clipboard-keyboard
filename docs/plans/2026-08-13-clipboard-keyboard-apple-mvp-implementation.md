@@ -23,10 +23,10 @@ The macOS and iOS targets own their AppKit, UIKit, SwiftUI, Keychain, filesystem
 - Add no third-party runtime dependency.
 - Use XcodeGen `2.46.0` as a development-only dependency because the empty repository needs one reproducible source of truth for four Apple targets, test targets, capabilities, and schemes.
 - Track `project.yml` and ignore the generated `ClipboardKeyboard.xcodeproj`; always change `project.yml` first and regenerate.
-- The operator confirmed availability and selected the bundle namespace `kr.donminzzi.clipboardkeyboard`, the App Group `group.kr.donminzzi.clipboardkeyboard`, and the CloudKit container `iCloud.kr.donminzzi.clipboardkeyboard` on 2026-08-14.
-- Treat the confirmed identifiers as the explicit implementation namespace selected by the operator on 2026-08-14.
+- Availability was confirmed, and the bundle namespace `kr.donminzzi.clipboardkeyboard`, the App Group `group.kr.donminzzi.clipboardkeyboard`, and the CloudKit container `iCloud.kr.donminzzi.clipboardkeyboard` were selected on 2026-08-14.
+- Treat the confirmed identifiers as the explicit implementation namespace selected on 2026-08-14.
 - Keep `DEVELOPMENT_TEAM` out of Git.
-- Default builds and tests must work with `CODE_SIGNING_ALLOWED=NO`; physical-device, App Group, Services, and CloudKit checks require a local signing configuration supplied by the operator.
+- Default builds and tests must work with `CODE_SIGNING_ALLOWED=NO`; physical-device, App Group, Services, and CloudKit checks require a local signing configuration supplied by the user.
 - Automatic Mac capture and iCloud synchronization both start disabled until explicit consent.
 - Store unpinned Mac history for at most 24 hours or 200 items by default, whichever limit is reached first.
 - Synchronize only explicit pinned revisions and content-free deletion or reset state.
@@ -698,7 +698,7 @@ git commit -m "feat(core): add pinned replica state"
 - [ ] **Step 1: Write failing authenticated-encryption and Keychain tests**
 
 Test key creation, repeat loading of the same 256-bit key, duplicate item rejection, Keychain denied, ciphertext bit flip, wrong key, and no plaintext fallback.
-Use dependency-injected `SecItem` operations so tests do not mutate the operator's login Keychain.
+Use dependency-injected `SecItem` operations so tests do not mutate the user's login Keychain.
 
 ```swift
 let sealed = try cipher.seal(envelope)
@@ -946,7 +946,7 @@ trunk fmt --no-fix --diff=full project.yml Apps/macOS Tests/macOS
 trunk check --no-fix project.yml Apps/macOS Tests/macOS
 ```
 
-With the operator's local signing configuration, run the app and verify the Service in TextEdit and Xcode, verify shortcut conflict behavior, verify the success shield, verify no history record appears, and verify the 60-second fallback.
+With the user's local signing configuration, run the app and verify the Service in TextEdit and Xcode, verify shortcut conflict behavior, verify the success shield, verify no history record appears, and verify the 60-second fallback.
 Record any host that does not expose selected content to Services as unsupported rather than a product failure.
 
 - [ ] **Step 6: Review capabilities and commit**
@@ -1252,7 +1252,7 @@ trunk fmt --no-fix --diff=full project.yml Packages/ClipboardCore Apps/iOS/Infra
 trunk check --no-fix project.yml Packages/ClipboardCore Apps/iOS/Infrastructure/Snapshot Extensions/Keyboard Tests/iOS Tests/Keyboard scripts/audit-keyboard-boundary.sh
 ```
 
-Before staging, verify that the App Group identifier is available to the operator's personal Apple Developer account.
+Before staging, verify that the App Group identifier is available to the personal Apple Developer account.
 If unavailable, stop and ask rather than changing identifiers silently.
 Stage only Task 10 files and commit:
 
@@ -1514,7 +1514,7 @@ Disabling sync must cancel future CloudKit reads and writes without deleting exi
 Add `iCloud.kr.donminzzi.clipboardkeyboard`, private CloudKit, and remote-notification capabilities only to the macOS and iPhone apps.
 Do not add them to the keyboard or Share extension.
 Keep `RequestsOpenAccess=false` and rerun the keyboard audit after regenerating the project.
-Before signed CloudKit testing, verify the container belongs to the operator's personal Apple Developer account; if registration fails, stop for operator direction.
+Before signed CloudKit testing, verify the container belongs to the personal Apple Developer account; if registration fails, stop for user direction.
 
 - [ ] **Step 7: Run automated sync tests and commit**
 
