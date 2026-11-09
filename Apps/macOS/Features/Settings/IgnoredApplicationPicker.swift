@@ -25,9 +25,8 @@ struct IgnoredApplicationPicker: View {
         guard panel.runModal() == .OK,
               let url = panel.url,
               let bundle = Bundle(url: url),
-              let identifier = bundle.bundleIdentifier
-        else { return }
-        guard let identity = verifiedIdentity(at: url, bundleIdentifier: identifier) else { return }
+              let identifier = bundle.bundleIdentifier,
+              let identity = verifiedIdentity(at: url, bundleIdentifier: identifier) else { return }
         model.addIgnoredApplication(identity, displayName: url.deletingPathExtension().lastPathComponent)
     }
 

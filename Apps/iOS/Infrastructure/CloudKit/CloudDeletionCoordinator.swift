@@ -146,10 +146,7 @@ final class CloudDeletionCoordinator {
     static func authenticateDeviceOwner() async throws {
         let context = LAContext()
         var evaluationError: NSError?
-        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &evaluationError) else {
-            throw CloudDeletionCoordinatorError.authenticationFailed
-        }
-        guard try await context.evaluatePolicy(
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &evaluationError), try await context.evaluatePolicy(
             .deviceOwnerAuthentication,
             localizedReason: "Authenticate to delete synced clipboard data from iCloud."
         ) else {

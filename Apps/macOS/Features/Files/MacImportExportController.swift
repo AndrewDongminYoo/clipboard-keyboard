@@ -73,8 +73,7 @@ struct MacImportExportController: Sendable {
     }
 
     func cancelTemporaryExport(_ url: URL) throws {
-        guard url.deletingLastPathComponent().standardizedFileURL == temporaryDirectory.standardizedFileURL else { return }
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard url.deletingLastPathComponent().standardizedFileURL == temporaryDirectory.standardizedFileURL, FileManager.default.fileExists(atPath: url.path) else { return }
         try removeTemporaryItem(url)
     }
 

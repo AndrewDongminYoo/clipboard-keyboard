@@ -58,8 +58,8 @@ enum ClipDocumentFormat: String, CaseIterable, Equatable, Sendable {
     }
 
     init?(pathExtension: String, contentType: UTType) {
-        guard let extensionFormat = Self(pathExtension: pathExtension) else { return nil }
-        guard contentType.conforms(to: extensionFormat.contentType),
+        guard let extensionFormat = Self(pathExtension: pathExtension),
+              contentType.conforms(to: extensionFormat.contentType),
               Self(contentType: contentType) == extensionFormat
         else { return nil }
         self = extensionFormat
@@ -90,10 +90,7 @@ struct ClipDocumentCodec: Sendable {
         let canonicalInsertionString: String
         switch declaredType {
         case .plainText, .markdown:
-            guard let value = String(data: data, encoding: .utf8) else {
-                throw ClipDocumentCodecError.malformedDocument
-            }
-            guard !containsBinaryControl(in: value) else {
+            guard let value = String(data: data, encoding: .utf8), !containsBinaryControl(in: value) else {
                 throw ClipDocumentCodecError.malformedDocument
             }
             guard !looksLikeRTF(value), !looksLikeHTML(value) else {

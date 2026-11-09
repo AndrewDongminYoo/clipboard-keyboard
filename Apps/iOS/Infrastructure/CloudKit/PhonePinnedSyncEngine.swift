@@ -516,11 +516,7 @@ actor PhonePinnedSyncEngine {
 
     private func scheduleDrain() {
         guard transport != nil else { return }
-        guard !sendInProgress else {
-            drainDirty = true
-            return
-        }
-        guard drainTask == nil else {
+        guard !sendInProgress, drainTask == nil else {
             drainDirty = true
             return
         }

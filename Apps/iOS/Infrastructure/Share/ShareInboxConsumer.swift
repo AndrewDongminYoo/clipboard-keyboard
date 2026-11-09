@@ -85,8 +85,7 @@ final class ShareInboxConsumer: ObservableObject {
         var decoded: [ShareInboxItem] = []
         var decodedByID: [UUID: ShareInboxItem] = [:]
         for url in urls {
-            guard let filenameID = Self.id(fromFinalFilename: url.lastPathComponent) else { continue }
-            guard terminalURLsByID[filenameID] == nil else { continue }
+            guard let filenameID = Self.id(fromFinalFilename: url.lastPathComponent), terminalURLsByID[filenameID] == nil else { continue }
             let protection: FileProtectionType?
             do {
                 protection = try operations.protection(url)

@@ -258,11 +258,7 @@ final class IntentDependencies: @unchecked Sendable {
                 }
                 throw ClipboardIntentError.unavailable
             }
-            guard epoch == lifecycleEpoch, protectedDataAvailable, !Task.isCancelled else {
-                await backend.close()
-                throw ClipboardIntentError.unavailable
-            }
-            guard gate.install(
+            guard epoch == lifecycleEpoch, protectedDataAvailable, !Task.isCancelled, gate.install(
                 backend.library,
                 textTransformer: backend.textTransformer,
                 for: unlock,

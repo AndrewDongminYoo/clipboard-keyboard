@@ -76,17 +76,13 @@ struct KeyboardSnapshotReader: Sendable {
             ? .primary(fileURL)
             : .fallback(snapshotURL: previousURL, digestURL: previousDigestURL)
         let result = read(source)
-        guard !operations.exists(fenceURL) else { return .unavailable(.revoked) }
-        guard sourceIsStillSelected(source, primaryURL: fileURL) else {
+        guard !operations.exists(fenceURL), sourceIsStillSelected(source, primaryURL: fileURL) else {
             return .unavailable(.revoked)
         }
         let revalidatedResult = read(source)
         guard sourceIsStillSelected(source, primaryURL: fileURL),
-              hasStableIdentity(result, revalidatedResult)
-        else {
-            return .unavailable(.revoked)
-        }
-        guard !operations.exists(fenceURL) else { return .unavailable(.revoked) }
+              hasStableIdentity(result, revalidatedResult),
+              !operations.exists(fenceURL) else { return .unavailable(.revoked) }
         return result
     }
 
@@ -130,13 +126,7 @@ struct KeyboardSnapshotReader: Sendable {
     }
 
     private func readFallback(_ fileURL: URL, digestURL: URL) -> SnapshotLoadResult {
-        guard operations.exists(fileURL), operations.exists(digestURL) else {
-            return .unavailable(.missing)
-        }
-        guard isCompletelyProtected(digestURL), let expectedDigest = try? operations.read(digestURL) else {
-            return .unavailable(.missing)
-        }
-        guard isCompletelyProtected(digestURL) else { return .unavailable(.missing) }
+        guard operations.exists(fileURL), operations.exists(digestURL), isCompletelyProtected(digestURL), let expectedDigest = try? operations.read(digestURL), isCompletelyProtected(digestURL) else { return .unavailable(.missing) }
         let result = read(fileURL)
         let snapshot: KeyboardSnapshot
         switch result {
@@ -153,9 +143,7 @@ struct KeyboardSnapshotReader: Sendable {
 
     private func read(_ fileURL: URL) -> SnapshotLoadResult {
         guard operations.exists(fileURL) else { return .unavailable(.missing) }
-        guard isCompletelyProtected(fileURL) else { return .unavailable(.locked) }
-        guard let data = try? operations.read(fileURL) else { return .unavailable(.locked) }
-        guard isCompletelyProtected(fileURL) else { return .unavailable(.locked) }
+        guard isCompletelyProtected(fileURL), let data = try? operations.read(fileURL), isCompletelyProtected(fileURL) else { return .unavailable(.locked) }
         switch KeyboardSnapshotValidator().validate(data) {
         case let .valid(snapshot):
             return snapshot.refreshRecommended(at: now())
